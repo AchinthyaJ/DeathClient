@@ -5,7 +5,8 @@
   "compatibilityLevel": "JAVA_21",
   "client": [
     "PlayerSkinProviderMixin",
-    "AbstractClientPlayerMixin"
+    "AbstractClientPlayerMixin",
+    "TitleScreenMixin"
   ],
   "injectors": {
     "defaultRequire": 1

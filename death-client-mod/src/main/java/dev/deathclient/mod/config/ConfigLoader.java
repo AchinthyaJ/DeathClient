@@ -4,12 +4,18 @@ import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import com.google.gson.JsonObject;
 import dev.deathclient.mod.CapeManager;
-import dev.deathclient.mod.DeathClientMod;
+import dev.deathclient.mod.AetherLauncherMod;
 import dev.deathclient.mod.SkinManager;
 import net.fabricmc.loader.api.FabricLoader;
 
 import java.io.IOException;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.nio.file.*;
+import java.time.Duration;
+import java.util.Arrays;
 
 /**
  * Reads death-client config and populates SkinManager / CapeManager.
@@ -39,6 +45,9 @@ public class ConfigLoader {
     private static final ConfigLoader INSTANCE = new ConfigLoader();
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
     private static final long HOT_RELOAD_INTERVAL_MS = 5000; // 5 seconds
+    private static final HttpClient HTTP_CLIENT = HttpClient.newBuilder()
+        .connectTimeout(Duration.ofSeconds(2))
+        .build();
 
     private Path configDir;
     private Path skinsDir;
@@ -55,6 +64,8 @@ public class ConfigLoader {
     private String capeFileName = "cape.png";
     private boolean skinEnabled = true;
     private boolean capeEnabled = true;
+    private String skinUrl = "";
+    private String capeUrl = "";
 
     private ConfigLoader() {}
 
@@ -76,7 +87,7 @@ public class ConfigLoader {
             Files.createDirectories(skinsDir);
             Files.createDirectories(capesDir);
         } catch (IOException e) {
-            DeathClientMod.LOGGER.error("[Death Client] Failed to create config directories", e);
+            AetherLauncherMod.LOGGER.error("[Aether Launcher] Failed to create config directories", e);
         }
 
         // Read JSON config if it exists
@@ -93,8 +104,15 @@ public class ConfigLoader {
     }
 
     private void readConfig() {
+        skinFileName = "skin.png";
+        capeFileName = "cape.png";
+        skinEnabled = true;
+        capeEnabled = true;
+        skinUrl = "";
+        capeUrl = "";
+
         if (!Files.exists(configFile)) {
-            DeathClientMod.LOGGER.info("[Death Client] No config file found, using defaults.");
+            AetherLauncherMod.LOGGER.info("[Aether Launcher] No config file found, using defaults.");
             return;
         }
 
@@ -106,13 +124,17 @@ public class ConfigLoader {
             if (obj.has("capeFile"))    capeFileName = obj.get("capeFile").getAsString();
             if (obj.has("skinEnabled")) skinEnabled  = obj.get("skinEnabled").getAsBoolean();
             if (obj.has("capeEnabled")) capeEnabled  = obj.get("capeEnabled").getAsBoolean();
+            if (obj.has("skinUrl"))     skinUrl      = obj.get("skinUrl").getAsString();
+            if (obj.has("capeUrl"))     capeUrl      = obj.get("capeUrl").getAsString();
 
             lastConfigModified = Files.getLastModifiedTime(configFile).toMillis();
-            DeathClientMod.LOGGER.info("[Death Client] Config loaded: skin={} ({}), cape={} ({})",
+            AetherLauncherMod.LOGGER.info("[Aether Launcher] Config loaded: skin={} ({}), cape={} ({}), skinUrl={}, capeUrl={}",
                 skinFileName, skinEnabled ? "enabled" : "disabled",
-                capeFileName, capeEnabled ? "enabled" : "disabled");
+                capeFileName, capeEnabled ? "enabled" : "disabled",
+                skinUrl,
+                capeUrl);
         } catch (Exception e) {
-            DeathClientMod.LOGGER.error("[Death Client] Failed to read config", e);
+            AetherLauncherMod.LOGGER.error("[Aether Launcher] Failed to read config", e);
         }
     }
 
@@ -121,8 +143,23 @@ public class ConfigLoader {
 
         if (!skinEnabled) {
             skinMgr.clearSkin();
-            DeathClientMod.LOGGER.info("[Death Client] Skin override is disabled in config.");
+            AetherLauncherMod.LOGGER.info("[Aether Launcher] Skin override is disabled in config.");
             return;
+        }
+
+        if (!skinUrl.isBlank()) {
+            Path remoteSkinPath = skinsDir.resolve("remote-skin.png");
+            if (downloadRemoteAsset(skinUrl, remoteSkinPath, "skin")) {
+                try {
+                    lastSkinModified = Files.getLastModifiedTime(remoteSkinPath).toMillis();
+                    skinMgr.loadSkin(remoteSkinPath);
+                    AetherLauncherMod.LOGGER.info("[Aether Launcher] Loaded skin from local node server: {}", skinUrl);
+                    return;
+                } catch (Exception e) {
+                    AetherLauncherMod.LOGGER.error("[Aether Launcher] Failed to load downloaded skin", e);
+                    skinMgr.clearSkin();
+                }
+            }
         }
 
         Path skinPath = skinsDir.resolve(skinFileName);
@@ -130,9 +167,9 @@ public class ConfigLoader {
             try {
                 lastSkinModified = Files.getLastModifiedTime(skinPath).toMillis();
                 skinMgr.loadSkin(skinPath);
-                DeathClientMod.LOGGER.info("[Death Client] Loaded skin from: {}", skinPath);
+                AetherLauncherMod.LOGGER.info("[Aether Launcher] Loaded skin from: {}", skinPath);
             } catch (Exception e) {
-                DeathClientMod.LOGGER.error("[Death Client] Failed to load skin", e);
+                AetherLauncherMod.LOGGER.error("[Aether Launcher] Failed to load skin", e);
                 skinMgr.clearSkin();
             }
         } else {
@@ -141,15 +178,15 @@ public class ConfigLoader {
                 for (Path entry : stream) {
                     lastSkinModified = Files.getLastModifiedTime(entry).toMillis();
                     skinMgr.loadSkin(entry);
-                    DeathClientMod.LOGGER.info("[Death Client] Auto-detected skin: {}", entry.getFileName());
+                    AetherLauncherMod.LOGGER.info("[Aether Launcher] Auto-detected skin: {}", entry.getFileName());
                     break; // Use the first one found
                 }
             } catch (IOException e) {
-                DeathClientMod.LOGGER.warn("[Death Client] Could not scan skins directory", e);
+                AetherLauncherMod.LOGGER.warn("[Aether Launcher] Could not scan skins directory", e);
             }
 
             if (!skinMgr.hasSkin()) {
-                DeathClientMod.LOGGER.info("[Death Client] No skin file found in {}", skinsDir);
+                AetherLauncherMod.LOGGER.info("[Aether Launcher] No skin file found in {}", skinsDir);
             }
         }
     }
@@ -159,8 +196,23 @@ public class ConfigLoader {
 
         if (!capeEnabled) {
             capeMgr.clearCape();
-            DeathClientMod.LOGGER.info("[Death Client] Cape override is disabled in config.");
+            AetherLauncherMod.LOGGER.info("[Aether Launcher] Cape override is disabled in config.");
             return;
+        }
+
+        if (!capeUrl.isBlank()) {
+            Path remoteCapePath = capesDir.resolve("remote-cape.png");
+            if (downloadRemoteAsset(capeUrl, remoteCapePath, "cape")) {
+                try {
+                    lastCapeModified = Files.getLastModifiedTime(remoteCapePath).toMillis();
+                    capeMgr.loadCape(remoteCapePath);
+                    AetherLauncherMod.LOGGER.info("[Aether Launcher] Loaded cape from local node server: {}", capeUrl);
+                    return;
+                } catch (Exception e) {
+                    AetherLauncherMod.LOGGER.error("[Aether Launcher] Failed to load downloaded cape", e);
+                    capeMgr.clearCape();
+                }
+            }
         }
 
         Path capePath = capesDir.resolve(capeFileName);
@@ -168,9 +220,9 @@ public class ConfigLoader {
             try {
                 lastCapeModified = Files.getLastModifiedTime(capePath).toMillis();
                 capeMgr.loadCape(capePath);
-                DeathClientMod.LOGGER.info("[Death Client] Loaded cape from: {}", capePath);
+                AetherLauncherMod.LOGGER.info("[Aether Launcher] Loaded cape from: {}", capePath);
             } catch (Exception e) {
-                DeathClientMod.LOGGER.error("[Death Client] Failed to load cape", e);
+                AetherLauncherMod.LOGGER.error("[Aether Launcher] Failed to load cape", e);
                 capeMgr.clearCape();
             }
         } else {
@@ -179,15 +231,15 @@ public class ConfigLoader {
                 for (Path entry : stream) {
                     lastCapeModified = Files.getLastModifiedTime(entry).toMillis();
                     capeMgr.loadCape(entry);
-                    DeathClientMod.LOGGER.info("[Death Client] Auto-detected cape: {}", entry.getFileName());
+                    AetherLauncherMod.LOGGER.info("[Aether Launcher] Auto-detected cape: {}", entry.getFileName());
                     break;
                 }
             } catch (IOException e) {
-                DeathClientMod.LOGGER.warn("[Death Client] Could not scan capes directory", e);
+                AetherLauncherMod.LOGGER.warn("[Aether Launcher] Could not scan capes directory", e);
             }
 
             if (!capeMgr.hasCape()) {
-                DeathClientMod.LOGGER.info("[Death Client] No cape file found in {}", capesDir);
+                AetherLauncherMod.LOGGER.info("[Aether Launcher] No cape file found in {}", capesDir);
             }
         }
     }
@@ -199,10 +251,12 @@ public class ConfigLoader {
             obj.addProperty("capeFile", capeFileName);
             obj.addProperty("skinEnabled", skinEnabled);
             obj.addProperty("capeEnabled", capeEnabled);
+            obj.addProperty("skinUrl", skinUrl);
+            obj.addProperty("capeUrl", capeUrl);
             Files.writeString(configFile, GSON.toJson(obj));
-            DeathClientMod.LOGGER.info("[Death Client] Wrote default config to {}", configFile);
+            AetherLauncherMod.LOGGER.info("[Aether Launcher] Wrote default config to {}", configFile);
         } catch (IOException e) {
-            DeathClientMod.LOGGER.error("[Death Client] Failed to write default config", e);
+            AetherLauncherMod.LOGGER.error("[Aether Launcher] Failed to write default config", e);
         }
     }
 
@@ -219,7 +273,7 @@ public class ConfigLoader {
             if (Files.exists(configFile)) {
                 long configMod = Files.getLastModifiedTime(configFile).toMillis();
                 if (configMod != lastConfigModified) {
-                    DeathClientMod.LOGGER.info("[Death Client] Config file changed, reloading...");
+                    AetherLauncherMod.LOGGER.info("[Aether Launcher] Config file changed, reloading...");
                     readConfig();
                     loadSkin();
                     loadCape();
@@ -227,27 +281,70 @@ public class ConfigLoader {
                 }
             }
 
-            // Check skin file changes
-            Path skinPath = skinsDir.resolve(skinFileName);
-            if (Files.exists(skinPath)) {
-                long skinMod = Files.getLastModifiedTime(skinPath).toMillis();
-                if (skinMod != lastSkinModified) {
-                    DeathClientMod.LOGGER.info("[Death Client] Skin file changed, hot-reloading...");
-                    loadSkin();
+            if (!skinUrl.isBlank()) {
+                loadSkin();
+            } else {
+                Path skinPath = skinsDir.resolve(skinFileName);
+                if (Files.exists(skinPath)) {
+                    long skinMod = Files.getLastModifiedTime(skinPath).toMillis();
+                    if (skinMod != lastSkinModified) {
+                        AetherLauncherMod.LOGGER.info("[Aether Launcher] Skin file changed, hot-reloading...");
+                        loadSkin();
+                    }
                 }
             }
 
-            // Check cape file changes
-            Path capePath = capesDir.resolve(capeFileName);
-            if (Files.exists(capePath)) {
-                long capeMod = Files.getLastModifiedTime(capePath).toMillis();
-                if (capeMod != lastCapeModified) {
-                    DeathClientMod.LOGGER.info("[Death Client] Cape file changed, hot-reloading...");
-                    loadCape();
+            if (!capeUrl.isBlank()) {
+                loadCape();
+            } else {
+                Path capePath = capesDir.resolve(capeFileName);
+                if (Files.exists(capePath)) {
+                    long capeMod = Files.getLastModifiedTime(capePath).toMillis();
+                    if (capeMod != lastCapeModified) {
+                        AetherLauncherMod.LOGGER.info("[Aether Launcher] Cape file changed, hot-reloading...");
+                        loadCape();
+                    }
                 }
             }
         } catch (IOException e) {
             // Silently ignore — file might be mid-write
+        }
+    }
+
+    private boolean downloadRemoteAsset(String url, Path targetPath, String assetLabel) {
+        try {
+            Files.createDirectories(targetPath.getParent());
+
+            HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(url))
+                .timeout(Duration.ofSeconds(3))
+                .GET()
+                .build();
+
+            HttpResponse<byte[]> response = HTTP_CLIENT.send(request, HttpResponse.BodyHandlers.ofByteArray());
+            if (response.statusCode() != 200) {
+                AetherLauncherMod.LOGGER.warn("[Aether Launcher] Node server returned {} for {} {}", response.statusCode(), assetLabel, url);
+                return false;
+            }
+
+            byte[] body = response.body();
+            if (body == null || body.length == 0) {
+                AetherLauncherMod.LOGGER.warn("[Aether Launcher] Empty {} payload from {}", assetLabel, url);
+                return false;
+            }
+
+            if (Files.exists(targetPath)) {
+                byte[] existing = Files.readAllBytes(targetPath);
+                if (Arrays.equals(existing, body)) {
+                    return true;
+                }
+            }
+
+            Files.write(targetPath, body, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
+            return true;
+        } catch (Exception e) {
+            AetherLauncherMod.LOGGER.warn("[Aether Launcher] Failed to download {} from {}", assetLabel, url, e);
+            return false;
         }
     }
 }

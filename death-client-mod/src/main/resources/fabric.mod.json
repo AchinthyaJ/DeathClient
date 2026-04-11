@@ -2,15 +2,15 @@
   "schemaVersion": 1,
   "id": "death-client-mod",
   "version": "${version}",
-  "name": "Death Client Skin & Cape Override",
-  "description": "Client-side skin and cape override mod for Death Client launcher. Loads custom textures from config/death-client/.",
-  "authors": ["Death Client"],
+  "name": "Aether Launcher Skin & Cape Override",
+  "description": "Client-side skin and cape override mod for Aether Launcher launcher. Loads custom textures from config/death-client/.",
+  "authors": ["Aether Launcher"],
   "contact": {},
   "license": "MIT",
   "icon": "assets/death-client-mod/icon.png",
   "environment": "client",
   "entrypoints": {
-    "client": ["dev.deathclient.mod.DeathClientMod"]
+    "client": ["dev.deathclient.mod.AetherLauncherMod"]
   },
   "mixins": ["death-client-mod.mixins.json"],
   "depends": {

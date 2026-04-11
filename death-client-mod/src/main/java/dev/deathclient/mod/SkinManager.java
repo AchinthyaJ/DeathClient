@@ -30,7 +30,7 @@ import java.nio.file.Path;
 public class SkinManager {
 
     private static final SkinManager INSTANCE = new SkinManager();
-    private static final Identifier SKIN_TEXTURE_ID = Identifier.of(DeathClientMod.MOD_ID, "textures/skin/custom_skin");
+    private static final Identifier SKIN_TEXTURE_ID = Identifier.of(AetherLauncherMod.MOD_ID, "textures/skin/custom_skin");
 
     private boolean hasSkin = false;
     private boolean textureRegistered = false;
@@ -54,7 +54,7 @@ public class SkinManager {
         if (client == null) {
             // Too early — mark for deferred loading
             this.hasSkin = true;
-            DeathClientMod.LOGGER.info("[Death Client/SkinManager] Marked skin for deferred loading: {}", skinPath);
+            AetherLauncherMod.LOGGER.info("[Aether Launcher/SkinManager] Marked skin for deferred loading: {}", skinPath);
             return;
         }
 
@@ -68,6 +68,18 @@ public class SkinManager {
     }
 
     private void registerTexture(Path skinPath) {
+        if (skinPath == null || !skinPath.toFile().exists()) return;
+        
+        // Safety check: Don't register if device isn't ready (reflective to compile on all versions)
+        try {
+            java.lang.reflect.Method getDeviceMethod = com.mojang.blaze3d.systems.RenderSystem.class.getMethod("getDevice");
+            if (getDeviceMethod.invoke(null) == null) return;
+        } catch (NoSuchMethodException e) {
+            // If getDevice doesn't exist, we're likely on an older version or it's not required yet
+        } catch (Exception e) {
+            return; // Other failure means not ready
+        }
+
         try {
             // Dispose old texture if present
             disposeTexture();
@@ -77,34 +89,45 @@ public class SkinManager {
             NativeImage image = NativeImage.read(is);
             is.close();
 
-            // Validate dimensions (standard Minecraft skin is 64×64 or legacy 64×32)
+            // Validate dimensions (standard Minecraft skin is 64x64 or legacy 64x32)
             int w = image.getWidth();
             int h = image.getHeight();
             if (w != 64 || (h != 64 && h != 32)) {
-                DeathClientMod.LOGGER.warn("[Death Client/SkinManager] Skin has unusual dimensions: {}×{} (expected 64×64 or 64×32)", w, h);
-                // We'll still load it — Minecraft can handle slightly off dimensions
+                AetherLauncherMod.LOGGER.warn("[Aether Launcher/SkinManager] Skin has unusual dimensions: {}x{} (expected 64x64 or 64x32)", w, h);
             }
 
-            // Create and register the texture safely to support multiple MC versions
+            // Create and register the texture using reflection for maximum cross-version compatibility
             try {
-                skinTexture = new NativeImageBackedTexture(image);
-            } catch (Throwable e) {
-                // Fallback using reflection if mapping changed in this Minecraft build
-                for (java.lang.reflect.Constructor<?> c : NativeImageBackedTexture.class.getConstructors()) {
-                    if (c.getParameterCount() == 1) {
+                java.lang.reflect.Constructor<?>[] constructors = NativeImageBackedTexture.class.getConstructors();
+                for (java.lang.reflect.Constructor<?> c : constructors) {
+                    Class<?>[] params = c.getParameterTypes();
+                    if (params.length == 1 && params[0] == NativeImage.class) {
                         skinTexture = (NativeImageBackedTexture) c.newInstance(image);
+                        break;
+                    } else if (params.length == 2 && params[1] == NativeImage.class) {
+                        if (params[0] == String.class) {
+                            skinTexture = (NativeImageBackedTexture) c.newInstance("death_client_skin", image);
+                        } else {
+                            skinTexture = (NativeImageBackedTexture) c.newInstance((java.util.function.Supplier<String>)() -> "death_client_skin", image);
+                        }
                         break;
                     }
                 }
-                if (skinTexture == null) throw new RuntimeException("Could not reflective construct NativeImageBackedTexture", e);
+                
+                if (skinTexture == null) {
+                    throw new RuntimeException("Could not find a valid NativeImageBackedTexture constructor!");
+                }
+            } catch (Exception ex) {
+                throw new RuntimeException("Reflective texture creation failed", ex);
             }
+
             MinecraftClient.getInstance().getTextureManager().registerTexture(SKIN_TEXTURE_ID, skinTexture);
             textureRegistered = true;
             hasSkin = true;
 
-            DeathClientMod.LOGGER.info("[Death Client/SkinManager] Skin texture registered: {} ({}×{})", SKIN_TEXTURE_ID, w, h);
+            AetherLauncherMod.LOGGER.info("[Aether Launcher/SkinManager] Skin texture registered successfully.");
         } catch (Exception e) {
-            DeathClientMod.LOGGER.error("[Death Client/SkinManager] Failed to register skin texture", e);
+            AetherLauncherMod.LOGGER.error("[Aether Launcher/SkinManager] Failed to register skin texture", e);
             hasSkin = false;
             textureRegistered = false;
         }
@@ -136,7 +159,7 @@ public class SkinManager {
         disposeTexture();
         hasSkin = false;
         currentSkinPath = null;
-        DeathClientMod.LOGGER.info("[Death Client/SkinManager] Skin cleared.");
+        AetherLauncherMod.LOGGER.info("[Aether Launcher/SkinManager] Skin cleared.");
     }
 
     // --- Accessors ---

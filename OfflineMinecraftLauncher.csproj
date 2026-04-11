@@ -1,22 +1,36 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
-  <PropertyGroup>
-    <OutputType>Exe</OutputType>
-    <TargetFramework>net10.0</TargetFramework>
-    <Nullable>enable</Nullable>
-    <ImplicitUsings>enable</ImplicitUsings>
-    <ApplicationIcon>minecraft.ico</ApplicationIcon>
-    <AvaloniaUseCompiledBindingsByDefault>false</AvaloniaUseCompiledBindingsByDefault>
-  </PropertyGroup>
+<PropertyGroup>
+  <OutputType>Exe</OutputType>
+  <TargetFramework>net8.0</TargetFramework>
+  <Nullable>enable</Nullable>
+  <ImplicitUsings>enable</ImplicitUsings>
+  <ApplicationIcon>minecraft.ico</ApplicationIcon>
 
+  <PublishSingleFile>true</PublishSingleFile>
+  <SelfContained>true</SelfContained>
+  <IncludeAllContentForSelfExtract>true</IncludeAllContentForSelfExtract>
+</PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Avalonia" Version="11.3.0" />
     <PackageReference Include="Avalonia.Desktop" Version="11.3.0" />
     <PackageReference Include="Avalonia.Themes.Fluent" Version="11.3.0" />
+    <PackageReference Include="Avalonia.Markup.Xaml.Loader" Version="11.3.0" />
     <PackageReference Include="CmlLib.Core" Version="4.0.5" />
     <PackageReference Include="System.Resources.Extensions" Version="9.0.10" />
   </ItemGroup>
-
+  <ItemGroup>
+    <AvaloniaResource Include="assets\**" />
+    <None Include="death-client\ui-layout-final.axaml.runtime">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="node-skin-server\**\*">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="assets\video-background-frames\**\*">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
   <ItemGroup>
     <Compile Remove="GradientPanel.cs" />
     <Compile Remove="LauncherForm.cs" />
@@ -31,7 +45,7 @@
   <ItemGroup>
     <Content Include="minecraft.ico" />
     <Content Include="Resources\**\*.png">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToOutputDirectory>Preserv eNewest</CopyToOutputDirectory>
     </Content>
   </ItemGroup>
 

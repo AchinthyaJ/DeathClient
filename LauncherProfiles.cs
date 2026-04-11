@@ -19,7 +19,7 @@ internal sealed class LauncherProfileStore
     public IReadOnlyList<LauncherProfile> LoadProfiles()
     {
         var profiles = new List<LauncherProfile>();
-        foreach (var directory in Directory.GetDirectories(_instancesRoot))
+        foreach (var directory in Directory.EnumerateDirectories(_instancesRoot))
         {
             var manifestPath = Path.Combine(directory, LauncherProfile.ManifestFileName);
             if (!File.Exists(manifestPath))
@@ -35,9 +35,9 @@ internal sealed class LauncherProfileStore
                 profile.InstanceDirectory = directory;
                 profiles.Add(profile);
             }
-            catch
+            catch (Exception ex)
             {
-                // Ignore malformed manifests and keep the launcher usable.
+                LauncherLog.Error($"Failed to load launcher profile manifest '{manifestPath}'.", ex);
             }
         }
 
@@ -46,7 +46,7 @@ internal sealed class LauncherProfileStore
             .ToList();
     }
 
-    public LauncherProfile CreateProfile(string name, string gameVersion, string loader, string? loaderVersion = null, string? sourceProjectSlug = null)
+    public LauncherProfile CreateProfile(string name, string gameVersion, string loader, string? loaderVersion = null, string? sourceProjectSlug = null, string? gameDirectoryOverride = null)
     {
         var slug = Slugify(name);
         if (string.IsNullOrWhiteSpace(slug))
@@ -66,7 +66,8 @@ internal sealed class LauncherProfileStore
             SourceProjectSlug = sourceProjectSlug,
             CreatedUtc = DateTime.UtcNow,
             UpdatedUtc = DateTime.UtcNow,
-            InstanceDirectory = directory
+            InstanceDirectory = directory,
+            GameDirectoryOverride = gameDirectoryOverride ?? string.Empty
         };
 
         Save(profile);
@@ -81,7 +82,7 @@ internal sealed class LauncherProfileStore
         Directory.CreateDirectory(profile.InstanceDirectory);
         profile.UpdatedUtc = DateTime.UtcNow;
         var manifestPath = Path.Combine(profile.InstanceDirectory, LauncherProfile.ManifestFileName);
-        File.WriteAllText(manifestPath, JsonSerializer.Serialize(profile, _jsonOptions));
+        LauncherLog.AtomicWriteAllText(manifestPath, JsonSerializer.Serialize(profile, _jsonOptions));
     }
 
     public void Delete(LauncherProfile profile)
@@ -158,6 +159,8 @@ internal sealed class LauncherProfile
     public DateTime CreatedUtc { get; set; }
     public DateTime UpdatedUtc { get; set; }
     public string InstanceDirectory { get; set; } = string.Empty;
+    public string GameDirectoryOverride { get; set; } = string.Empty;
+    public string JvmArguments { get; set; } = string.Empty;
 
     public string ModsDirectory => Path.Combine(InstanceDirectory, "mods");
 

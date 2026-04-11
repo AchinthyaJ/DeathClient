@@ -161,7 +161,7 @@ namespace OfflineMinecraftLauncher
             titleLabel.Name = "titleLabel";
             titleLabel.Size = new Size(244, 41);
             titleLabel.TabIndex = 0;
-            titleLabel.Text = "Death Client";
+            titleLabel.Text = "Aether Launcher";
             // 
             // contentLayout
             // 
@@ -846,7 +846,7 @@ namespace OfflineMinecraftLauncher
             MinimumSize = new Size(1260, 780);
             Name = "LauncherForm";
             StartPosition = FormStartPosition.CenterScreen;
-            Text = "Death Client";
+            Text = "Aether Launcher";
             Load += LauncherForm_Load;
             headerPanel.ResumeLayout(false);
             headerPanel.PerformLayout();

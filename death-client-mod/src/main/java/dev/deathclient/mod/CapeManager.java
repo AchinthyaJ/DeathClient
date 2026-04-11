@@ -27,7 +27,7 @@ import java.nio.file.Path;
 public class CapeManager {
 
     private static final CapeManager INSTANCE = new CapeManager();
-    private static final Identifier CAPE_TEXTURE_ID = Identifier.of(DeathClientMod.MOD_ID, "textures/cape/custom_cape");
+    private static final Identifier CAPE_TEXTURE_ID = Identifier.of(AetherLauncherMod.MOD_ID, "textures/cape/custom_cape");
 
     private boolean hasCape = false;
     private boolean textureRegistered = false;
@@ -49,7 +49,7 @@ public class CapeManager {
         MinecraftClient client = MinecraftClient.getInstance();
         if (client == null) {
             this.hasCape = true;
-            DeathClientMod.LOGGER.info("[Death Client/CapeManager] Marked cape for deferred loading: {}", capePath);
+            AetherLauncherMod.LOGGER.info("[Aether Launcher/CapeManager] Marked cape for deferred loading: {}", capePath);
             return;
         }
 
@@ -74,7 +74,7 @@ public class CapeManager {
 
             // Standard cape dimensions: 64×32 or multiples (some HD capes use 2048×1024)
             if (h != 32 && h != 64 && w != 64 && w != 128) {
-                DeathClientMod.LOGGER.warn("[Death Client/CapeManager] Cape has unusual dimensions: {}×{}", w, h);
+                AetherLauncherMod.LOGGER.warn("[Aether Launcher/CapeManager] Cape has unusual dimensions: {}×{}", w, h);
             }
 
             // Create and register the texture safely crossing obfuscation discrepancies
@@ -93,9 +93,9 @@ public class CapeManager {
             textureRegistered = true;
             hasCape = true;
 
-            DeathClientMod.LOGGER.info("[Death Client/CapeManager] Cape texture registered: {} ({}×{})", CAPE_TEXTURE_ID, w, h);
+            AetherLauncherMod.LOGGER.info("[Aether Launcher/CapeManager] Cape texture registered: {} ({}×{})", CAPE_TEXTURE_ID, w, h);
         } catch (Exception e) {
-            DeathClientMod.LOGGER.error("[Death Client/CapeManager] Failed to register cape texture", e);
+            AetherLauncherMod.LOGGER.error("[Aether Launcher/CapeManager] Failed to register cape texture", e);
             hasCape = false;
             textureRegistered = false;
         }
@@ -124,7 +124,7 @@ public class CapeManager {
         disposeTexture();
         hasCape = false;
         currentCapePath = null;
-        DeathClientMod.LOGGER.info("[Death Client/CapeManager] Cape cleared.");
+        AetherLauncherMod.LOGGER.info("[Aether Launcher/CapeManager] Cape cleared.");
     }
 
     // --- Accessors ---

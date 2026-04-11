@@ -1,7 +1,7 @@
 package dev.deathclient.mod.mixin;
 
 import dev.deathclient.mod.CapeManager;
-import dev.deathclient.mod.DeathClientMod;
+import dev.deathclient.mod.AetherLauncherMod;
 import dev.deathclient.mod.SkinManager;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.network.AbstractClientPlayerEntity;
