@@ -17,7 +17,7 @@ public static class UILoader
             var xaml = File.ReadAllText(axamlPath);
             if (string.IsNullOrWhiteSpace(xaml))
             {
-                LauncherLog.Warn($"Skipping runtime XAML load because '{axamlPath}' is empty.");
+                // LauncherLog.Warn($"Skipping runtime XAML load because '{axamlPath}' is empty.");
                 return null;
             }
 

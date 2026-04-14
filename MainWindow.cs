@@ -27,6 +27,9 @@ using System.Text.Json;
 using Avalonia.Animation;
 using Avalonia.Animation.Easings;
 using Avalonia.Media.Transformation;
+using System.Diagnostics;
+using System.Windows.Input;
+using System.Threading;
 
 namespace OfflineMinecraftLauncher;
 
@@ -102,12 +105,14 @@ public sealed class MainWindow : Window
     private Button createProfileButton = null!;
     private Button renameProfileButton = null!;
     private Button btnStart = null!;
+    private CancellationTokenSource? _launchCts;
     private Button launchNavButton = null!;
     private Button profilesNavButton = null!;
     private Button modrinthNavButton = null!;
     private Button performanceNavButton = null!;
     private Button settingsNavButton = null!;
     private Button layoutNavButton = null!;
+    private Button accountsNavButton = null!;
     private TextBlock activeProfileBadge = null!;
     private TextBlock activeContextLabel = null!;
     private TextBlock installModeLabel = null!;
@@ -149,11 +154,14 @@ public sealed class MainWindow : Window
     public ProgressBar? PbProgress { get; set; }
     public TextBox? ModrinthSearchInput { get; set; }
     public System.Collections.Generic.Dictionary<string, object> Fields { get; } = new();
-    private Border _instanceEditorOverlay = new();
-    private Border _playOverlay = new();
-    private TextBlock _playOverlayIcon = new();
-    private TextBlock _playOverlayLabel = new();
-
+    private Border _instanceEditorOverlay = null!;
+    private Border _accountsOverlay = null!;
+    private StackPanel _accountsListPanel = new();
+    private MinecraftAuthenticationService _authService = new();
+    private Border _playOverlay = null!;
+    private TextBlock _playOverlayIcon = null!;
+    private TextBlock _playOverlayLabel = null!;
+    // _notificationCard removed (notification replaced with Featured Servers section)
     // Quick Instance panel
     private ComboBox _quickVersionCombo = null!;
     private ComboBox _quickLoaderCombo = null!;
@@ -175,6 +183,14 @@ public sealed class MainWindow : Window
     private string _activeSection = "launch";
     private UIWatcher? _watcher;
 
+    // Responsive UI state
+    private bool _isNarrowMode;
+    private Border? _avatarGlass;
+    private StackPanel? _avatarControls;
+    private Grid? _avatarActions;
+    private StackPanel? _mainContentStack;
+    private readonly SemaphoreSlim _versionListSemaphore = new(1, 1);
+
     public MainWindow()
     {
         var initialPath = new MinecraftPath();
@@ -193,24 +209,31 @@ public sealed class MainWindow : Window
         ConfigureWindowChrome();
         EnsureFallbackControlsInitialized();
 
+        this.SizeChanged += (s, e) => UpdateResponsiveLayout();
+        Opened += async (_, _) => 
+        {
+            UpdateResponsiveLayout();
+            try { await InitializeAsync(); } catch { }
+        };
+
         // ALWAYS build the C# UI first as the default/fallback
         Content = BuildRoot();
 
-        var path = Path.GetFullPath(Path.Combine("death-client", "ui-layout-final.axaml.runtime"));
+        var path = Path.Combine(AppRuntime.DataDirectory, "death-client", "ui-layout-final.axaml.runtime");
         Control? root = UILoader.Load(path);
         if (root != null)
         {
             try {
                 UIBinder.Bind(root, this);
                 Content = root; 
-                Console.WriteLine("[MainWindow] Premium AXAML loaded and applied.");
+                LauncherLog.Info("[MainWindow] Premium AXAML loaded and applied.");
             } catch (Exception ex) {
-                Console.WriteLine($"[MainWindow] AXAML bind failed: {ex.Message}");
+                LauncherLog.Info($"[MainWindow] AXAML bind failed: {ex.Message}");
             }
         }
         else
         {
-            Console.WriteLine("[MainWindow] Using default C# UI (AXAML load skipped or failed).");
+            LauncherLog.Info("[MainWindow] Using default C# UI (AXAML load skipped or failed).");
         }
         
         _watcher = new UIWatcher(path, (newRoot) => 
@@ -222,20 +245,14 @@ public sealed class MainWindow : Window
                         UIBinder.Bind(newRoot, this);
                         Content = newRoot;
                     } catch (Exception ex) {
-                        Console.WriteLine($"[MainWindow] Watcher bind failed: {ex.Message}");
+                        LauncherLog.Info($"[MainWindow] Watcher bind failed: {ex.Message}");
                     }
                 });
             }
         });
 
-        Opened += async (_, _) => {
-            try {
-                await InitializeAsync();
-            } catch (Exception ex) {
-                Console.WriteLine($"[MainWindow] Critical initialization error: {ex}");
-                // On Windows, this prevented a silent crash by ensuring the exception is caught
-            }
-        };
+
+        // Removed duplicated Opened handler
         Closed += (_, _) =>
         {
             _searchCancellation?.Cancel();
@@ -255,9 +272,10 @@ public sealed class MainWindow : Window
 
     private Control BuildRoot()
     {
+        EnsureFallbackControlsInitialized();
         var topNavigation = IsTopNavigationEnabled();
         var collapsedSidebar = IsSidebarCollapsed();
-        var sidebarWidth = collapsedSidebar ? 84 : 232;
+        var sidebarWidth = collapsedSidebar ? 72 : 240;
 
         if (topNavigation)
         {
@@ -267,6 +285,12 @@ public sealed class MainWindow : Window
                 RowDefinitions = new RowDefinitions("Auto,*"),
                 Children =
                 {
+                    new Border {
+                        Background = new SolidColorBrush(Color.FromArgb(8, 110, 91, 255)),
+                        IsHitTestVisible = false,
+                        ZIndex = 999
+                    }.With(rowSpan: 2),
+                    
                     new Canvas
                     {
                         Children =
@@ -309,17 +333,19 @@ public sealed class MainWindow : Window
                             }
                         }
                     }.With(row: 0),
-                    DetachFromParent(BuildTopNavigation()).With(row: 0),
-                    DetachFromParent(BuildContent()).With(row: 1),
-                    DetachFromParent(_instanceEditorOverlay).With(row: 0, columnSpan: 1)
+                    DetachFromParent(BuildTopNavigation())!.With(row: 0),
+                    DetachFromParent(BuildContent())!.With(row: 1),
+                    DetachFromParent(_instanceEditorOverlay)!.With(row: 0, rowSpan: 2, columnSpan: 1),
+                    DetachFromParent(_accountsOverlay)!.With(row: 0, rowSpan: 2, columnSpan: 2)
                 }
             }, topNavigation: true);
         }
 
+        var sidebarOnRight = HasLayoutToken("sidebar:right");
         return WrapWindowSurface(new Grid
         {
             Background = GetMainBackground(),
-            ColumnDefinitions = _settings.SidebarOnRight
+            ColumnDefinitions = sidebarOnRight
                 ? new ColumnDefinitions($"*,{sidebarWidth}")
                 : new ColumnDefinitions($"{sidebarWidth},*"),
             Children =
@@ -341,8 +367,8 @@ public sealed class MainWindow : Window
                                 RadiusY = new RelativeScalar(0.55, RelativeUnit.Relative),
                                 GradientStops =
                                 {
-                                    new GradientStop(Color.FromArgb(20, Color.Parse(_settings.AccentColor).R, Color.Parse(_settings.AccentColor).G, Color.Parse(_settings.AccentColor).B), 0),
-                                    new GradientStop(Color.FromArgb(0, Color.Parse(_settings.AccentColor).R, Color.Parse(_settings.AccentColor).G, Color.Parse(_settings.AccentColor).B), 1)
+                                    new GradientStop(Color.FromArgb(20, Color.Parse(_settings.AccentColor ?? "#6E5BFF").R, Color.Parse(_settings.AccentColor ?? "#6E5BFF").G, Color.Parse(_settings.AccentColor ?? "#6E5BFF").B), 0),
+                                    new GradientStop(Color.FromArgb(0, Color.Parse(_settings.AccentColor ?? "#6E5BFF").R, Color.Parse(_settings.AccentColor ?? "#6E5BFF").G, Color.Parse(_settings.AccentColor ?? "#6E5BFF").B), 1)
                                 }
                             },
                             [Canvas.LeftProperty] = -120d,
@@ -357,8 +383,8 @@ public sealed class MainWindow : Window
                             {
                                 GradientStops =
                                 {
-                                    new GradientStop(Color.FromArgb(15, Color.Parse(_settings.AccentColor).R, Color.Parse(_settings.AccentColor).G, Color.Parse(_settings.AccentColor).B), 0),
-                                    new GradientStop(Color.FromArgb(0, Color.Parse(_settings.AccentColor).R, Color.Parse(_settings.AccentColor).G, Color.Parse(_settings.AccentColor).B), 1)
+                                    new GradientStop(Color.FromArgb(15, Color.Parse(_settings.AccentColor ?? "#6E5BFF").R, Color.Parse(_settings.AccentColor ?? "#6E5BFF").G, Color.Parse(_settings.AccentColor ?? "#6E5BFF").B), 0),
+                                    new GradientStop(Color.FromArgb(0, Color.Parse(_settings.AccentColor ?? "#6E5BFF").R, Color.Parse(_settings.AccentColor ?? "#6E5BFF").G, Color.Parse(_settings.AccentColor ?? "#6E5BFF").B), 1)
                                 }
                             },
                             [Canvas.RightProperty] = -180d,
@@ -366,9 +392,10 @@ public sealed class MainWindow : Window
                         }
                     }
                 },
-                _settings.ClientLayout?.Contains("sidebar:right") == true ? DetachFromParent(BuildContent()).With(column: 0) : DetachFromParent(BuildHeader()),
-                _settings.ClientLayout?.Contains("sidebar:right") == true ? DetachFromParent(BuildHeader()).With(column: 1) : DetachFromParent(BuildContent()).With(column: 1),
-                DetachFromParent(_instanceEditorOverlay).With(columnSpan: 2)
+                sidebarOnRight ? DetachFromParent(BuildContent())!.With(column: 0) : DetachFromParent(BuildHeader())!,
+                sidebarOnRight ? DetachFromParent(BuildHeader())!.With(column: 1) : DetachFromParent(BuildContent())!.With(column: 1),
+                DetachFromParent(_instanceEditorOverlay)!.With(columnSpan: 2),
+                DetachFromParent(_accountsOverlay)!.With(columnSpan: 2)
             }
         }, topNavigation: false);
     }
@@ -404,7 +431,13 @@ public sealed class MainWindow : Window
 
     private void ConfigureWindowChrome()
     {
-        Title = "DeathClient";
+        Title = "Aether Launcher";
+        Name = "aether-launcher";
+        Width = 1344;
+        Height = 714;
+        MinWidth = 1100;
+        MinHeight = 610;
+        WindowStartupLocation = WindowStartupLocation.CenterScreen;
         Background = Brushes.Transparent;
         SystemDecorations = SystemDecorations.None;
         ExtendClientAreaToDecorationsHint = true;
@@ -418,13 +451,13 @@ public sealed class MainWindow : Window
 
         try
         {
-            Icon = new WindowIcon(AssetLoader.Open(new Uri("avares://OfflineMinecraftLauncher/assets/deathclient-taskbar.png")));
+            Icon = new WindowIcon(AssetLoader.Open(new Uri("avares://AetherLauncher/assets/deathclient-taskbar.png")));
         }
         catch
         {
             try
             {
-                Icon = new WindowIcon(AssetLoader.Open(new Uri("avares://OfflineMinecraftLauncher/assets/dc-icon.png")));
+                Icon = new WindowIcon(AssetLoader.Open(new Uri("avares://AetherLauncher/assets/dc-icon.png")));
             }
             catch
             {
@@ -464,6 +497,7 @@ public sealed class MainWindow : Window
         };
     }
 
+
     private StackPanel BuildWindowControls()
     {
         var minimizeButton = CreateWindowControlButton("−", Color.Parse("#F4B63C"), () => WindowState = WindowState.Minimized);
@@ -478,14 +512,18 @@ public sealed class MainWindow : Window
         return new StackPanel
         {
             Orientation = Orientation.Horizontal,
-            Spacing = 10,
+            Spacing = 16,
             HorizontalAlignment = HorizontalAlignment.Right,
             VerticalAlignment = VerticalAlignment.Top,
             Children =
             {
-                minimizeButton,
-                maximizeButton,
-                closeButton
+                DetachFromParent(accountsNavButton)!,
+                new StackPanel
+                {
+                    Orientation = Orientation.Horizontal,
+                    Spacing = 10,
+                    Children = { minimizeButton, maximizeButton, closeButton }
+                }
             }
         };
     }
@@ -547,14 +585,38 @@ public sealed class MainWindow : Window
 
     private Brush GetMainBackground()
     {
+        // 1. Try Custom Background file on disk
         var customBgPath = Path.Combine(_defaultMinecraftPath.BasePath, "death-client", "custom_bg.png");
         if (File.Exists(customBgPath))
         {
             try {
-                return new ImageBrush(new Bitmap(customBgPath)) { Stretch = Stretch.UniformToFill, Opacity = 0.4 };
+                return new ImageBrush(new Bitmap(customBgPath)) 
+                { 
+                    Stretch = Stretch.UniformToFill, 
+                    AlignmentX = AlignmentX.Center,
+                    AlignmentY = AlignmentY.Center,
+                    Opacity = 0.65 
+                };
             } catch { }
         }
 
+        // 2. Try Default Bundled Resource (Ensures background exists in published version)
+        try 
+        {
+            var asset = AssetLoader.Open(new Uri("avares://AetherLauncher/assets/launcher_background.png"));
+            if (asset != null)
+            {
+                return new ImageBrush(new Bitmap(asset)) 
+                { 
+                    Stretch = Stretch.UniformToFill, 
+                    AlignmentX = AlignmentX.Center,
+                    AlignmentY = AlignmentY.Center,
+                    Opacity = 0.65 
+                };
+            }
+        } catch { }
+
+        // 3. Final Fallback to Linear Gradient
         return new LinearGradientBrush
         {
             StartPoint = new RelativePoint(0, 0, RelativeUnit.Relative),
@@ -598,17 +660,15 @@ public sealed class MainWindow : Window
                 VerticalAlignment = VerticalAlignment.Center,
                 Children =
                 {
-                    new TextBlock
+                    new Image
                     {
-                        Text = "☠",
-                        Foreground = Brushes.White,
-                        FontSize = 22,
-                        FontWeight = FontWeight.Bold,
+                        Source = new Bitmap(AssetLoader.Open(new Uri("avares://AetherLauncher/assets/deathclient-taskbar.png"))),
+                        Width = 28, Height = 28,
                         VerticalAlignment = VerticalAlignment.Center
                     },
                     new TextBlock
                     {
-                        Text = "DEATH CLIENT",
+                        Text = "AETHER LAUNCHER",
                         Foreground = Brushes.White,
                         FontSize = 18,
                         FontWeight = FontWeight.Black,
@@ -630,7 +690,6 @@ public sealed class MainWindow : Window
         settingsNavButton.Click += (_, _) => SetActiveSection("settings");
         layoutNavButton = CreateNavButton("▤", "Layout", collapsed);
         layoutNavButton.Click += (_, _) => SetActiveSection("layout");
-
         ApplyHoverMotion(launchNavButton);
         ApplyHoverMotion(profilesNavButton);
         ApplyHoverMotion(modrinthNavButton);
@@ -676,13 +735,13 @@ public sealed class MainWindow : Window
                 Spacing = collapsed ? 10 : 12,
                 Children =
                 {
-                    brand,
-                    DetachFromParent(launchNavButton),
-                    DetachFromParent(profilesNavButton),
-                    DetachFromParent(modrinthNavButton),
-                    DetachFromParent(performanceNavButton),
-                    DetachFromParent(settingsNavButton),
-                    DetachFromParent(layoutNavButton)
+                    brand!,
+                    DetachFromParent(launchNavButton)!,
+                    DetachFromParent(profilesNavButton)!,
+                    DetachFromParent(modrinthNavButton)!,
+                    DetachFromParent(performanceNavButton)!,
+                    DetachFromParent(settingsNavButton)!,
+                    DetachFromParent(layoutNavButton)!
                 }
             }
         };
@@ -723,8 +782,9 @@ public sealed class MainWindow : Window
 
         foreach (var button in new[] { launchNavButton, profilesNavButton, modrinthNavButton, performanceNavButton, settingsNavButton, layoutNavButton })
         {
-            button.Height = 42;
-            button.MinWidth = 112;
+            if (button == null) continue;
+            button.Height = 40;
+            button.MinWidth = 100;
         }
 
         var brandBlock = new StackPanel
@@ -734,17 +794,15 @@ public sealed class MainWindow : Window
             VerticalAlignment = VerticalAlignment.Center,
             Children =
             {
-                new TextBlock
+                new Image
                 {
-                    Text = "☠",
-                    Foreground = Brushes.White,
-                    FontSize = 22,
-                    FontWeight = FontWeight.Bold,
+                    Source = new Bitmap(AssetLoader.Open(new Uri("avares://AetherLauncher/assets/deathclient-taskbar.png"))),
+                    Width = 28, Height = 28,
                     VerticalAlignment = VerticalAlignment.Center
                 },
                 new TextBlock
                 {
-                    Text = "DEATH CLIENT",
+                    Text = "AETHER LAUNCHER",
                     Foreground = Brushes.White,
                     FontSize = 18,
                     FontWeight = FontWeight.Black,
@@ -757,17 +815,17 @@ public sealed class MainWindow : Window
         var centeredTabs = new StackPanel
         {
             Orientation = Orientation.Horizontal,
-            Spacing = 14,
+            Spacing = 10,
             HorizontalAlignment = HorizontalAlignment.Center,
             VerticalAlignment = VerticalAlignment.Center,
             Children =
             {
-                DetachFromParent(launchNavButton),
-                DetachFromParent(profilesNavButton),
-                DetachFromParent(modrinthNavButton),
-                DetachFromParent(performanceNavButton),
-                DetachFromParent(settingsNavButton),
-                DetachFromParent(layoutNavButton)
+                DetachFromParent(launchNavButton)!,
+                DetachFromParent(profilesNavButton)!,
+                DetachFromParent(modrinthNavButton)!,
+                DetachFromParent(performanceNavButton)!,
+                DetachFromParent(settingsNavButton)!,
+                DetachFromParent(layoutNavButton)!
             }
         };
 
@@ -776,10 +834,10 @@ public sealed class MainWindow : Window
             Background = new SolidColorBrush(Color.FromArgb(210, 9, 12, 18)),
             BorderBrush = new SolidColorBrush(Color.Parse("#171B24")),
             BorderThickness = new Thickness(0, 0, 0, 1),
-            Padding = new Thickness(22, 16, 22, 16),
+            Padding = new Thickness(22, 10, 22, 10),
             Child = new Grid
             {
-                ColumnDefinitions = new ColumnDefinitions("230,*,230"),
+                ColumnDefinitions = new ColumnDefinitions("200,*,Auto"),
                 VerticalAlignment = VerticalAlignment.Center,
                 Children =
                 {
@@ -793,19 +851,42 @@ public sealed class MainWindow : Window
         return topNavigationBar;
     }
 
-    private static T DetachFromParent<T>(T control) where T : Control
+    private static T? DetachFromParent<T>(T? control) where T : Control
     {
+        if (control == null) return null;
         if (control.Parent is Panel panel)
             panel.Children.Remove(control);
         else if (control.Parent is ContentControl cc)
             cc.Content = null;
         else if (control.Parent is Decorator d)
             d.Child = null;
+        else if (control.Parent is Viewbox vb)
+            vb.Child = null;
         return control;
     }
 
     private void EnsureFallbackControlsInitialized()
     {
+        if (accountsNavButton == null)
+        {
+            accountsNavButton = new Button
+            {
+                Background = new SolidColorBrush(Color.FromArgb(180, 26, 31, 46)),
+                Foreground = Brushes.White,
+                CornerRadius = new CornerRadius(20),
+                Padding = new Thickness(20, 10),
+                MinWidth = 160,
+                HorizontalAlignment = HorizontalAlignment.Right,
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(0, 0, 8, 0),
+                FontWeight = FontWeight.Bold,
+                ZIndex = 50
+            };
+            accountsNavButton.Click += (_, _) => ShowAccountsOverlay();
+            ApplyHoverMotion(accountsNavButton);
+            UpdateAccountsButtonText();
+        }
+
         usernameInput ??= CreateTextBox();
         usernameInput.Watermark = "Player name";
         usernameInput.TextChanged -= UsernameInput_TextChanged;
@@ -850,7 +931,19 @@ public sealed class MainWindow : Window
         if (btnStart is null)
         {
             btnStart = CreatePrimaryButton("▶ Play", "#6E5BFF", Colors.White);
-            btnStart.Click += async (_, _) => await LaunchAsync();
+            btnStart.Click += async (_, _) => 
+            {
+                if (_launchCts != null)
+                {
+                    _launchCts.Cancel();
+                    btnStart.IsEnabled = false;
+                    btnStart.Content = "Cancelling...";
+                }
+                else
+                {
+                    await LaunchAsync();
+                }
+            };
         }
 
         activeProfileBadge ??= CreateStatusTextBlock();
@@ -859,8 +952,6 @@ public sealed class MainWindow : Window
 
         characterImage ??= new Image
         {
-            Width = 180,
-            Height = 180,
             Stretch = Stretch.Uniform,
             HorizontalAlignment = HorizontalAlignment.Center,
             VerticalAlignment = VerticalAlignment.Center
@@ -918,7 +1009,7 @@ public sealed class MainWindow : Window
         heroInstanceLabel ??= new TextBlock
         {
             Foreground = Brushes.White,
-            FontSize = 30,
+            FontSize = 22,
             FontWeight = FontWeight.Black,
             TextWrapping = TextWrapping.Wrap
         };
@@ -943,19 +1034,50 @@ public sealed class MainWindow : Window
         _quickModSearchButton.Click -= QuickModSearchButton_Click;
         _quickModSearchButton.Click += QuickModSearchButton_Click;
 
+        _playOverlay ??= new Border();
+        _playOverlayIcon ??= new TextBlock();
+        _playOverlayLabel ??= new TextBlock();
+
         _quickModResults.ItemsSource = _quickSearchResults;
-        _playOverlay.Child ??= new StackPanel
+        
+        // Use a more robust detachment and re-attachment for the play button
+        var playStack = new StackPanel
         {
             Orientation = Orientation.Horizontal,
             HorizontalAlignment = HorizontalAlignment.Center,
-            VerticalAlignment = VerticalAlignment.Center,
-            Children = { _playOverlayIcon, _playOverlayLabel }
+            VerticalAlignment = VerticalAlignment.Center
         };
+        
+        var icon = DetachFromParent(_playOverlayIcon);
+        var label = DetachFromParent(_playOverlayLabel);
+        if (icon != null) playStack.Children.Add(icon);
+        if (label != null) playStack.Children.Add(label);
+        
+        var accentColor = Color.Parse(_settings.AccentColor);
+        _playOverlay.Background = new SolidColorBrush(Color.FromArgb(40, accentColor.R, accentColor.G, accentColor.B));
+        _playOverlay.BorderBrush = new SolidColorBrush(accentColor);
+        _playOverlay.BorderThickness = new Thickness(1);
+        _playOverlay.CornerRadius = new CornerRadius(20);
+        _playOverlay.Padding = new Thickness(24, 12);
+        
+        _playOverlayIcon.Foreground = new SolidColorBrush(accentColor);
+        _playOverlayIcon.FontSize = 24;
+        _playOverlayIcon.Text = "▶";
+        
+        _playOverlayLabel.Foreground = Brushes.White;
+        _playOverlayLabel.FontSize = 18;
+        _playOverlayLabel.FontWeight = FontWeight.Bold;
+        _playOverlayLabel.Margin = new Thickness(12, 0, 0, 0);
+        _playOverlayLabel.Text = "PLAY";
+
+        _playOverlay.Child = playStack;
         _playOverlay.PointerPressed -= PlayOverlay_PointerPressed;
         _playOverlay.PointerPressed += PlayOverlay_PointerPressed;
         _playOverlay.Cursor = new Cursor(StandardCursorType.Hand);
 
-        _instanceEditorOverlay = BuildInstanceEditorOverlay();
+        _instanceEditorOverlay ??= BuildInstanceEditorOverlay();
+        _accountsListPanel ??= new StackPanel();
+        _accountsOverlay ??= BuildAccountsOverlay();
         PbProgress = pbProgress;
         ModrinthSearchInput = modrinthSearchInput;
         UpdateSelectedProjectDetails();
@@ -996,7 +1118,7 @@ public sealed class MainWindow : Window
                                 Children =
                                 {
                                     CreatePanelEyebrow("Name"),
-                                    DetachFromParent(profileNameInput)
+                                    DetachFromParent(profileNameInput)!
                                 }
                             },
                             new StackPanel
@@ -1005,7 +1127,7 @@ public sealed class MainWindow : Window
                                 Children =
                                 {
                                     CreatePanelEyebrow("Loader"),
-                                    DetachFromParent(profileLoaderCombo)
+                                    DetachFromParent(profileLoaderCombo)!
                                 }
                             },
                             new StackPanel
@@ -1020,8 +1142,8 @@ public sealed class MainWindow : Window
                                         ColumnSpacing = 8,
                                         Children =
                                         {
-                                            DetachFromParent(instanceCategoryCombo).With(column: 0),
-                                            DetachFromParent(instanceVersionCombo).With(column: 1)
+                                            DetachFromParent(instanceCategoryCombo)!.With(column: 0),
+                                            DetachFromParent(instanceVersionCombo)!.With(column: 1)
                                         }
                                     }
                                 }
@@ -1032,7 +1154,7 @@ public sealed class MainWindow : Window
                                 Children =
                                 {
                                     CreatePanelEyebrow("Game Directory Override"),
-                                    DetachFromParent(profileGameDirInput)
+                                    DetachFromParent(profileGameDirInput)!
                                 }
                             },
                             new Grid
@@ -1041,9 +1163,9 @@ public sealed class MainWindow : Window
                                 ColumnSpacing = 10,
                                 Children =
                                 {
-                                    DetachFromParent(createProfileButton).With(column: 0),
-                                    DetachFromParent(renameProfileButton).With(column: 1),
-                                    cancelButton.With(column: 2)
+                                    DetachFromParent(createProfileButton)!.With(column: 0),
+                                    DetachFromParent(renameProfileButton)!.With(column: 1),
+                                    cancelButton!.With(column: 2)
                                 }
                             }
                         }
@@ -1051,6 +1173,500 @@ public sealed class MainWindow : Window
                 }
             }
         };
+    }
+
+    private void ShowAccountsOverlay()
+    {
+        RefreshAccountsList();
+        _accountsOverlay.IsVisible = true;
+        if (accountsNavButton != null) accountsNavButton.IsVisible = false;
+    }
+
+    private bool _isAuthenticating;
+    private void RefreshAccountsList()
+    {
+        _accountsListPanel.Children.Clear();
+        foreach (var account in _settings.Accounts.ToList())
+        {
+            var isSelected = account.Id == _settings.SelectedAccountId;
+
+            var avatar = new TextBlock
+            {
+                Text = "🧑",
+                FontSize = 24,
+                Foreground = Brushes.Gray,
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(0, 0, 12, 0)
+            };
+
+            var nameBlock = new TextBlock
+            {
+                Text = account.Username,
+                FontWeight = FontWeight.Bold,
+                Foreground = Brushes.White,
+                FontSize = 14
+            };
+
+            var typeColor = account.Provider == "microsoft" ? "#5B80FF" : "#A0A8B8";
+            var typeLabel = account.Provider == "microsoft" ? "Microsoft" : "Offline";
+
+            var typeBlock = new TextBlock
+            {
+                Text = typeLabel,
+                FontSize = 11,
+                Foreground = new SolidColorBrush(Color.Parse(typeColor))
+            };
+
+            var textStack = new StackPanel { VerticalAlignment = VerticalAlignment.Center, Children = { nameBlock, typeBlock } };
+
+            var removeBtn = new Button
+            {
+                Content = "🗑",
+                Background = Brushes.Transparent,
+                Foreground = new SolidColorBrush(Color.Parse("#FF5B5B")),
+                IsVisible = false 
+            };
+            removeBtn.Click += (_, _) =>
+            {
+                _settings.Accounts.Remove(account);
+                if (_settings.SelectedAccountId == account.Id)
+                {
+                    _settings.SelectedAccountId = string.Empty;
+                    usernameInput.Text = string.Empty;
+                }
+                _settingsStore.Save(_settings);
+                RefreshAccountsList();
+            };
+
+            var rowGrid = new Grid
+            {
+                ColumnDefinitions = new ColumnDefinitions("Auto,*,Auto"),
+                Children = { avatar.With(column: 0), textStack.With(column: 1), removeBtn.With(column: 2) }
+            };
+
+            var card = new Border
+            {
+                Background = new SolidColorBrush(Color.Parse("#1A1F2E")),
+                CornerRadius = new CornerRadius(12),
+                Padding = new Thickness(12),
+                BorderBrush = isSelected ? new SolidColorBrush(Color.Parse("#38D6C4")) : Brushes.Transparent,
+                BorderThickness = new Thickness(isSelected ? 2 : 0),
+                Child = rowGrid
+            };
+
+            card.PointerEntered += (_, _) => { removeBtn.IsVisible = true; card.Background = new SolidColorBrush(Color.Parse("#22283A")); };
+            card.PointerExited += (_, _) => { removeBtn.IsVisible = false; card.Background = new SolidColorBrush(Color.Parse("#1A1F2E")); };
+
+             card.PointerPressed += (_, _) =>
+            {
+                _settings.SelectedAccountId = account.Id;
+                usernameInput.Text = account.Username;
+                _settingsStore.Save(_settings);
+                RefreshAccountsList();
+                UpdateAccountsButtonText();
+                _accountsOverlay.IsVisible = false;
+                if (accountsNavButton != null) accountsNavButton.IsVisible = true;
+            };
+
+            _accountsListPanel.Children.Add(card);
+        }
+    }
+
+    private async Task AddOfflineAccountAsync()
+    {
+        var username = await DialogService.ShowTextInputAsync(this, "Add Offline Account", "Enter your username:");
+        if (string.IsNullOrWhiteSpace(username)) return;
+
+        var acc = new LauncherAccount { Provider = "offline", Username = username.Trim(), DisplayName = username.Trim() };
+        _settings.Accounts.Add(acc);
+        _settings.SelectedAccountId = acc.Id;
+        usernameInput.Text = acc.Username;
+        _settingsStore.Save(_settings);
+        UpdateAccountsButtonText();
+        RefreshAccountsList();
+    }
+
+    private async Task<bool> TryRefreshAccountAsync(LauncherAccount account)
+    {
+        if (account.Provider != "microsoft" || !account.IsExpired) return true;
+
+        try
+        {
+            var clientId = string.IsNullOrWhiteSpace(_settings.MicrosoftClientId) ? "00000000402b5328" : _settings.MicrosoftClientId;
+            LauncherLog.Info($"[Microsoft Auth] Refreshing token for {account.Username}...");
+            
+            var refreshed = await _authService.RefreshMinecraftAccountAsync(clientId, account, CancellationToken.None);
+            
+            // Update existing account in settings
+            var idx = _settings.Accounts.FindIndex(a => a.Id == account.Id);
+            if (idx != -1)
+            {
+                _settings.Accounts[idx] = refreshed;
+                _settingsStore.Save(_settings);
+                return true;
+            }
+        }
+        catch (Exception ex)
+        {
+            LauncherLog.Info($"[Microsoft Auth] Refresh failed for {account.Username}: {ex.Message}");
+        }
+        return false;
+    }
+
+    private async Task AddMicrosoftAccountAsync()
+    {
+        if (_isAuthenticating) return;
+        _isAuthenticating = true;
+
+        var clientId = string.IsNullOrWhiteSpace(_settings.MicrosoftClientId) ? "00000000402b5328" : _settings.MicrosoftClientId;
+        using var cts = new CancellationTokenSource();
+        
+        try
+        {
+            LauncherLog.Info("[Microsoft Auth] Starting device code login...");
+            var session = await _authService.BeginDeviceLoginAsync(clientId, cts.Token);
+
+            // Open browser and show premium dialog
+            Process.Start(new ProcessStartInfo { FileName = session.VerificationUri, UseShellExecute = true });
+            
+            var dialogTask = DialogService.ShowMicrosoftAuthDialogAsync(this, session.UserCode, session.VerificationUri, cts);
+            var pollTask = _authService.CompleteDeviceLoginAsync(clientId, session, cts.Token);
+
+            var completedTask = await Task.WhenAny(dialogTask, pollTask);
+
+            if (completedTask == pollTask)
+            {
+                var account = await pollTask;
+                var existing = _settings.Accounts.FirstOrDefault(a => a.Uuid == account.Uuid && a.Provider == "microsoft");
+                if (existing != null) _settings.Accounts.Remove(existing);
+
+                _settings.Accounts.Add(account);
+                _settings.SelectedAccountId = account.Id;
+                usernameInput.Text = account.Username;
+                _settingsStore.Save(_settings);
+                
+                LauncherLog.Info($"[Microsoft Auth] Successfully logged in as {account.Username}");
+                UpdateAccountsButtonText();
+                RefreshAccountsList();
+            }
+            else
+            {
+                LauncherLog.Info("[Microsoft Auth] Login cancelled by user.");
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            LauncherLog.Info("[Microsoft Auth] Login timed out or cancelled.");
+        }
+        catch (Exception ex)
+        {
+            await DialogService.ShowInfoAsync(this, "Authentication Failed", ex.Message);
+        }
+        finally
+        {
+            _isAuthenticating = false;
+        }
+    }
+
+
+
+    private Border BuildAccountsOverlay()
+    {
+        var closeButton = new Button
+        {
+            Content = "×",
+            Background = Brushes.Transparent,
+            Foreground = Brushes.White,
+            FontSize = 24,
+            Padding = new Thickness(8, 0)
+        };
+        closeButton.Click += (_, _) => 
+        {
+            _accountsOverlay.IsVisible = false;
+            if (accountsNavButton != null) accountsNavButton.IsVisible = true;
+        };
+
+        var header = new Grid
+        {
+            ColumnDefinitions = new ColumnDefinitions("*,Auto"),
+            Children =
+            {
+                new TextBlock { Text = "Accounts", FontSize = 22, FontWeight = FontWeight.Bold, Foreground = Brushes.White, VerticalAlignment = VerticalAlignment.Center },
+                closeButton.With(column: 1)
+            }
+        };
+
+        var addMicrosoftBtn = CreatePrimaryButton("Add Microsoft Account", "#5B80FF", Colors.White);
+        addMicrosoftBtn.Click += async (_, _) => await AddMicrosoftAccountAsync();
+
+        var addOfflineBtn = CreateSecondaryButton("Add Offline");
+        addOfflineBtn.Click += async (_, _) => await AddOfflineAccountAsync();
+
+        var footer = new Grid
+        {
+            ColumnDefinitions = new ColumnDefinitions("*,*"),
+            ColumnSpacing = 8,
+            Children =
+            {
+                addMicrosoftBtn.With(column: 0),
+                addOfflineBtn.With(column: 1)
+            }
+        };
+
+        var panel = new Border
+        {
+            Width = 380,
+            Background = new SolidColorBrush(Color.FromArgb(240, 9, 12, 18)),
+            BorderBrush = new SolidColorBrush(Color.FromArgb(100, 30, 40, 60)),
+            BorderThickness = new Thickness(1, 0, 0, 0),
+            HorizontalAlignment = HorizontalAlignment.Right,
+            VerticalAlignment = VerticalAlignment.Stretch,
+            Padding = new Thickness(24),
+            Child = new Grid
+            {
+                RowDefinitions = new RowDefinitions("Auto,*,Auto"),
+                Children =
+                {
+                    header.With(row: 0),
+                    new ScrollViewer
+                    {
+                        Margin = new Thickness(0, 20),
+                        VerticalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto,
+                        Content = _accountsListPanel.With(sp => sp.Spacing = 8)
+                    }.With(row: 1),
+                    footer.With(row: 2)
+                }
+            }
+        };
+
+        return new Border
+        {
+            IsVisible = false,
+            Background = new SolidColorBrush(Color.FromArgb(120, 0, 0, 0)),
+            ZIndex = 100,
+            Child = panel
+        };
+    }
+
+    private void UpdateAccountsButtonText()
+    {
+        if (accountsNavButton != null)
+        {
+            var activeName = string.IsNullOrWhiteSpace(_settings.Username) ? "Accounts" : _settings.Username;
+            accountsNavButton.Content = $"🧑 {activeName}";
+        }
+    }
+
+    private Control BuildFeaturedServersSection()
+    {
+        var header = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Spacing = 10,
+            Margin = new Thickness(0, 16, 0, 12),
+            Children =
+            {
+                new Border
+                {
+                    Width = 3, Height = 16,
+                    CornerRadius = new CornerRadius(2),
+                    Background = new SolidColorBrush(Color.Parse(_settings.AccentColor)),
+                    VerticalAlignment = VerticalAlignment.Center
+                },
+                new TextBlock
+                {
+                    Text = "FEATURED SERVERS",
+                    FontSize = 13,
+                    FontWeight = FontWeight.Bold,
+                    Foreground = new SolidColorBrush(Color.Parse("#8E96A8")),
+                    LetterSpacing = 1.5,
+                    VerticalAlignment = VerticalAlignment.Center
+                }
+            }
+        };
+
+        var breakpointCard = BuildServerCard(
+            bgAsset: "avares://AetherLauncher/assets/launcher_background.png",
+            logoAsset: "avares://AetherLauncher/assets/breakpoint-logo.png",
+            serverName: "BreakPoint MC",
+            tagLine: "⭐ FEATURED",
+            description: "Cracked Server. Optimised for Aether.",
+            ip: "breakpoint.mcsrv.net",
+            accentHex: "#7E6AFF",
+            isFeatured: true
+        );
+
+        var hypixelCard = BuildServerCard(
+            bgAsset: "avares://AetherLauncher/assets/hypixel_card_bg.png",
+            serverName: "Hypixel",
+            tagLine: "MINI-GAMES",
+            description: "The world's largest server.",
+            ip: "mc.hypixel.net",
+            accentHex: "#F4C430",
+            isFeatured: false
+        );
+
+        var donutCard = BuildServerCard(
+            bgAsset: "avares://AetherLauncher/assets/donut_smp_card_bg.png",
+            serverName: "Donut SMP",
+            tagLine: "SURVIVAL",
+            description: "Community survival SMP.",
+            ip: "play.donutsmp.net",
+            accentHex: "#FF8C42",
+            isFeatured: false
+        );
+
+        var cardsGrid = new Grid
+        {
+            ColumnDefinitions = new ColumnDefinitions("3.5*, *, *"),
+            ColumnSpacing = 10,
+            Height = 135,
+            Children =
+            {
+                breakpointCard,
+                hypixelCard.With(column: 1),
+                donutCard.With(column: 2)
+            }
+        };
+
+        return new StackPanel { Children = { header, cardsGrid } };
+    }
+
+    private Border BuildServerCard(string bgAsset, string serverName, string tagLine, string description, string ip, string accentHex, bool isFeatured, string? logoAsset = null)
+    {
+        ImageBrush? bgBrush = null;
+        try
+        {
+            var bmp = new Bitmap(AssetLoader.Open(new Uri(bgAsset)));
+            bgBrush = new ImageBrush(bmp) { Stretch = Stretch.UniformToFill };
+        }
+        catch { }
+
+        // Logo overlay (shows when NOT hovered)
+        var logoContent = new Panel();
+        if (!string.IsNullOrEmpty(logoAsset))
+        {
+            try
+            {
+                var logoBmp = new Bitmap(AssetLoader.Open(new Uri(logoAsset)));
+                logoContent.Children.Add(new Image
+                {
+                    Source = logoBmp,
+                    Stretch = Stretch.UniformToFill,
+                    VerticalAlignment = VerticalAlignment.Center,
+                    HorizontalAlignment = HorizontalAlignment.Center,
+                    Transitions = new Transitions { new DoubleTransition { Property = Control.OpacityProperty, Duration = TimeSpan.FromMilliseconds(200) } }
+                });
+            }
+            catch { }
+        }
+
+        // Overlay that shows on hover
+        var hoverOverlay = new Border
+        {
+            Background = new LinearGradientBrush
+            {
+                StartPoint = new RelativePoint(0, 1, RelativeUnit.Relative),
+                EndPoint = new RelativePoint(0, 0, RelativeUnit.Relative),
+                GradientStops =
+                {
+                    new GradientStop(Color.FromArgb(230, 9, 12, 20), 0),
+                    new GradientStop(Color.FromArgb(140, 9, 12, 20), 0.6),
+                    new GradientStop(Color.FromArgb(0, 9, 12, 20), 1)
+                }
+            },
+            Opacity = 0,
+            Transitions = new Transitions
+            {
+                new DoubleTransition { Property = Border.OpacityProperty, Duration = TimeSpan.FromMilliseconds(250) }
+            },
+            Child = new StackPanel
+            {
+                VerticalAlignment = VerticalAlignment.Bottom,
+                Margin = new Thickness(14, 0, 14, 14),
+                Spacing = 4,
+                Children =
+                {
+                    new Border
+                    {
+                        Background = new SolidColorBrush(Color.FromArgb(40, Color.Parse(accentHex).R, Color.Parse(accentHex).G, Color.Parse(accentHex).B)),
+                        BorderBrush = new SolidColorBrush(Color.FromArgb(120, Color.Parse(accentHex).R, Color.Parse(accentHex).G, Color.Parse(accentHex).B)),
+                        BorderThickness = new Thickness(1),
+                        CornerRadius = new CornerRadius(4),
+                        Padding = new Thickness(6, 2),
+                        HorizontalAlignment = HorizontalAlignment.Left,
+                        Child = new TextBlock
+                        {
+                            Text = tagLine,
+                            FontSize = 11,
+                            FontWeight = FontWeight.Bold,
+                            Foreground = new SolidColorBrush(Color.Parse(accentHex)),
+                            LetterSpacing = 1
+                        }
+                    },
+                    new TextBlock
+                    {
+                        Text = serverName,
+                        FontSize = isFeatured ? 20 : 16,
+                        FontWeight = FontWeight.Bold,
+                        Foreground = Brushes.White
+                    },
+                    new TextBlock
+                    {
+                        Text = description,
+                        FontSize = 12.5,
+                        Foreground = new SolidColorBrush(Color.Parse("#A0AABB")),
+                        TextWrapping = TextWrapping.Wrap
+                    },
+                    new Button
+                    {
+                        Content = $"Copy IP: {ip}",
+                        FontSize = 9.5,
+                        Foreground = new SolidColorBrush(Color.Parse(accentHex)),
+                        Background = Brushes.Transparent,
+                        Padding = new Thickness(0, 2, 0, 0),
+                        Cursor = new Cursor(StandardCursorType.Hand),
+                        Command = new RelayCommand(() => CopyServerIpToClipboard(ip))
+                    }
+                }
+            }
+        };
+
+        var card = new Border
+        {
+            CornerRadius = new CornerRadius(16),
+            ClipToBounds = true,
+            Background = bgBrush != null ? bgBrush : new SolidColorBrush(Color.Parse("#1A1F2E")),
+            BorderBrush = new SolidColorBrush(Color.FromArgb(isFeatured ? (byte)80 : (byte)40, Color.Parse(accentHex).R, Color.Parse(accentHex).G, Color.Parse(accentHex).B)),
+            BorderThickness = new Thickness(1),
+            BoxShadow = isFeatured ? new BoxShadows(new BoxShadow
+            {
+                Blur = 20,
+                Color = Color.FromArgb(100, Color.Parse(accentHex).R, Color.Parse(accentHex).G, Color.Parse(accentHex).B),
+                OffsetX = 0,
+                OffsetY = 0
+            }) : default,
+            Child = new Grid { Children = { logoContent, hoverOverlay } }
+        };
+
+        card.PointerEntered += (_, _) => { hoverOverlay.Opacity = 1; logoContent.Opacity = 0; };
+        card.PointerExited += (_, _) => { hoverOverlay.Opacity = 0; logoContent.Opacity = 1; };
+
+        return card;
+    }
+
+    private async void CopyServerIpToClipboard(string ip)
+    {
+        var topLevel = TopLevel.GetTopLevel(this);
+        if (topLevel?.Clipboard == null) return;
+        await topLevel.Clipboard.SetTextAsync(ip);
+    }
+
+    private async void CopyToClipboard(string text)
+    {
+        var topLevel = TopLevel.GetTopLevel(this);
+        if (topLevel == null) return;
+        await topLevel.Clipboard!.SetTextAsync(text);
     }
 
     private void EnsureSectionsBuilt()
@@ -1071,13 +1687,98 @@ public sealed class MainWindow : Window
         layoutSection.IsVisible = _activeSection == "layout";
     }
 
+    private void InvalidateUiCache()
+    {
+        // Sections
+        launchSection = null!;
+        modrinthSection = null!;
+        profilesSection = null!;
+        performanceSection = null!;
+        settingsSection = null!;
+        layoutSection = null!;
+        
+        // Overlays
+        _instanceEditorOverlay = null!;
+        _accountsOverlay = null!;
+        _playOverlay = new Border();
+        
+        // Navigation
+        launchNavButton = null!;
+        profilesNavButton = null!;
+        modrinthNavButton = null!;
+        performanceNavButton = null!;
+        settingsNavButton = null!;
+        layoutNavButton = null!;
+        accountsNavButton = null!;
+        
+        // Shared Labels & Fields
+        heroInstanceLabel = null!;
+        heroPerformanceLabel = null!;
+        loadingLabel = null!;
+        statusLabel = null!;
+        installDetailsLabel = null!;
+        activeProfileBadge = null!;
+        activeContextLabel = null!;
+        usernameInput = null!;
+        
+        // Progress & Stats
+        pbFiles = null!;
+        pbProgress = null!;
+        homeFpsStatValue = null!;
+        homeRamStatValue = null!;
+        performanceFpsStatValue = null!;
+        performanceRamStatValue = null!;
+        
+        // Input Controls
+        cbVersion = null!;
+        minecraftVersion = null!;
+        downloadVersionButton = null!;
+        profileNameInput = null!;
+        profileGameDirInput = null!;
+        profileLoaderCombo = null!;
+        instanceVersionCombo = null!;
+        instanceCategoryCombo = null!;
+        _quickVersionCombo = null!;
+        _quickLoaderCombo = null!;
+        _quickInstallButton = null!;
+        _quickModSearch = null!;
+        _quickModSearchButton = null!;
+        _accountsListPanel = null!;
+        _playOverlay = null!;
+        _playOverlayIcon = null!;
+        _playOverlayLabel = null!;
+        
+        // Missed Premium UI Fields
+        characterImage = null!;
+        activeProfileBadge = null!;
+        activeContextLabel = null!;
+        installModeLabel = null!;
+        btnStart = null!;
+        profileListBox = null!;
+        modrinthResultsListBox = null!;
+        modrinthDetailsBox = null!;
+        modrinthResultsSummary = null!;
+        installSelectedButton = null!;
+        importMrpackButton = null!;
+        profileInspectorTitle = null!;
+        profileInspectorMeta = null!;
+        profileInspectorPath = null!;
+        clearProfileButton = null!;
+        modrinthSearchInput = null!;
+        modrinthProjectTypeCombo = null!;
+        modrinthLoaderCombo = null!;
+        modrinthSourceCombo = null!;
+        modrinthSearchButton = null!;
+        modrinthVersionInput = null!;
+    }
+
     private Control BuildContent()
     {
         EnsureSectionsBuilt();
 
         return new Grid
         {
-            Margin = IsTopNavigationEnabled() ? new Thickness(42, 28, 42, 40) : new Thickness(40),
+            Margin = IsTopNavigationEnabled() ? new Thickness(28, 4, 28, 24) : new Thickness(22),
             Children =
             {
                 new Border
@@ -1091,12 +1792,12 @@ public sealed class MainWindow : Window
                     {
                         Children =
                         {
-                            DetachFromParent(launchSection),
-                            DetachFromParent(modrinthSection),
-                            DetachFromParent(profilesSection),
-                            DetachFromParent(performanceSection),
-                            DetachFromParent(settingsSection),
-                            DetachFromParent(layoutSection)
+                            DetachFromParent(launchSection)!,
+                            DetachFromParent(modrinthSection)!,
+                            DetachFromParent(profilesSection)!,
+                            DetachFromParent(performanceSection)!,
+                            DetachFromParent(settingsSection)!,
+                            DetachFromParent(layoutSection)!
                         }
                     }
                 }
@@ -1115,7 +1816,7 @@ public sealed class MainWindow : Window
                 {
                     Text = "Workspace",
                     Foreground = Brushes.White,
-                    FontSize = 22,
+                    FontSize = 16,
                     FontWeight = FontWeight.Bold
                 },
                 new TextBlock
@@ -1175,10 +1876,9 @@ public sealed class MainWindow : Window
             Spacing = 4,
             Children =
             {
-                heroInstanceLabel,
-                heroPerformanceLabel,
+                DetachFromParent(heroInstanceLabel)!,
+                DetachFromParent(heroPerformanceLabel)!,
                 new Border { Height = 12 },
-                usernameInput,
                 new Border { Height = 1, Background = new SolidColorBrush(Color.FromArgb(40, 255,255,255)), Margin = new Thickness(0, 8, 0, 0) }
             }
         };
@@ -1205,9 +1905,9 @@ public sealed class MainWindow : Window
             Color = Color.FromArgb(180, 110, 91, 255)
         });
         _playOverlayIcon.Text = "▶";
-        _playOverlayIcon.FontSize = 20;
+        _playOverlayIcon.FontSize = 18;
         _playOverlayLabel.Text = "PLAY";
-        _playOverlayLabel.FontSize = 18;
+        _playOverlayLabel.FontSize = 15;
         _playOverlayLabel.Opacity = 1;
         _playOverlayLabel.Margin = new Thickness(10, 0, 0, 0);
 
@@ -1226,8 +1926,8 @@ public sealed class MainWindow : Window
                 ColumnDefinitions = new ColumnDefinitions("Auto,*,Auto"),
                 Children =
                 {
-                    new TextBlock { Text = "□", FontSize = 18, Foreground = new SolidColorBrush(Color.Parse(_settings.AccentColor)) },
-                    new TextBlock { Text = "Mods", FontSize = 14, FontWeight = FontWeight.Bold, Foreground = Brushes.White, Margin = new Thickness(12, 0) }.With(column: 1),
+                    new TextBlock { Text = "□", FontSize = 15, Foreground = new SolidColorBrush(Color.Parse(_settings.AccentColor)) },
+                    new TextBlock { Text = "Mods", FontSize = 12.5, FontWeight = FontWeight.Bold, Foreground = Brushes.White, Margin = new Thickness(12, 0) }.With(column: 1),
                     new TextBlock { Text = "〉", FontSize = 12, Foreground = Brushes.Gray }.With(column: 2)
                 }
             }
@@ -1247,8 +1947,8 @@ public sealed class MainWindow : Window
                 ColumnDefinitions = new ColumnDefinitions("Auto,*,Auto"),
                 Children =
                 {
-                    new TextBlock { Text = "〓", FontSize = 18, Foreground = new SolidColorBrush(Color.Parse(_settings.AccentColor)) },
-                    new TextBlock { Text = "Instances", FontSize = 13, FontWeight = FontWeight.Bold, Foreground = Brushes.White, Margin = new Thickness(12, 0) }.With(column: 1),
+                    new TextBlock { Text = "〓", FontSize = 15, Foreground = new SolidColorBrush(Color.Parse(_settings.AccentColor)) },
+                    new TextBlock { Text = "Instances", FontSize = 11.5, FontWeight = FontWeight.Bold, Foreground = Brushes.White, Margin = new Thickness(12, 0) }.With(column: 1),
                     new TextBlock { Text = "〉", FontSize = 12, Foreground = Brushes.Gray }.With(column: 2)
                 }
             }
@@ -1263,50 +1963,84 @@ public sealed class MainWindow : Window
 
         foreach (var c in actionsGroup.Children) ApplyHoverMotion(c as Control);
 
-        var skinBtn = new Button { Content = "Skin", Background = new SolidColorBrush(Color.FromArgb(20, 255, 255, 255)), CornerRadius = new CornerRadius(12), Height = 34, FontSize = 12, HorizontalAlignment = HorizontalAlignment.Stretch };
+        var skinContent = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6, HorizontalAlignment = HorizontalAlignment.Center, Children = { new TextBlock { Text = "●", FontSize = 10, Foreground = Brushes.LightGray, VerticalAlignment = VerticalAlignment.Center }, new TextBlock { Text = "Skin", FontSize = 12, VerticalAlignment = VerticalAlignment.Center } } };
+        var skinBtn = new Button { Content = skinContent, Background = new SolidColorBrush(Color.FromArgb(20, 255, 255, 255)), CornerRadius = new CornerRadius(12), Height = 34, HorizontalAlignment = HorizontalAlignment.Stretch };
         skinBtn.Click += async (_, _) => await ChangeSkinAsync();
         ApplyHoverMotion(skinBtn);
 
-        var capeBtn = new Button { Content = "Cape", Background = new SolidColorBrush(Color.FromArgb(20, 255, 255, 255)), CornerRadius = new CornerRadius(12), Height = 34, FontSize = 12, HorizontalAlignment = HorizontalAlignment.Stretch };
+        var capeContent = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6, HorizontalAlignment = HorizontalAlignment.Center, Children = { new TextBlock { Text = "■", FontSize = 10, Foreground = Brushes.LightGray, VerticalAlignment = VerticalAlignment.Center }, new TextBlock { Text = "Cape", FontSize = 12, VerticalAlignment = VerticalAlignment.Center } } };
+        var capeBtn = new Button { Content = capeContent, Background = new SolidColorBrush(Color.FromArgb(20, 255, 255, 255)), CornerRadius = new CornerRadius(12), Height = 34, HorizontalAlignment = HorizontalAlignment.Stretch };
         capeBtn.Click += async (_, _) => await ChangeCapeAsync();
         ApplyHoverMotion(capeBtn);
+
+        var resetContent = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6, HorizontalAlignment = HorizontalAlignment.Center, Children = { new TextBlock { Text = "×", FontSize = 12, Foreground = Brushes.LightGray, VerticalAlignment = VerticalAlignment.Center }, new TextBlock { Text = "Reset", FontSize = 12, VerticalAlignment = VerticalAlignment.Center } } };
+        var resetBtn = new Button { Content = resetContent, Background = new SolidColorBrush(Color.FromArgb(20, 255, 255, 255)), CornerRadius = new CornerRadius(12), Height = 34, HorizontalAlignment = HorizontalAlignment.Stretch };
+        resetBtn.Click += (_, _) => {
+            _settings.CustomSkinPath = string.Empty;
+            _settingsStore.Save(_settings);
+            // SyncSkinShuffleAvatarToLauncher removed
+        };
+        ApplyHoverMotion(resetBtn);
 
         var avatarPanel = CreateGlassPanel(new StackPanel
         {
             Spacing = 12,
             Children =
             {
-                new TextBlock { Text = "Avatar", FontSize = 14, Foreground = Brushes.White, Opacity = 0.8 },
-                new Border { Height = 200, Child = characterImage },
+                new TextBlock { Text = "Avatar", FontSize = 12.5, FontWeight = FontWeight.Bold, Foreground = Brushes.White, Opacity = 0.8 },
+                new Border { Height = 290, Child = DetachFromParent(characterImage) },
+                new TextBlock 
+                { 
+                    Text = "Character features (Skins/Capes) are under development.", 
+                    Foreground = new SolidColorBrush(Color.Parse("#A0A8B8")), 
+                    FontSize = 10, 
+                    HorizontalAlignment = HorizontalAlignment.Center,
+                    Margin = new Thickness(0, 4, 0, 0)
+                },
                 new Grid
                 {
-                    ColumnDefinitions = new ColumnDefinitions("*,*"),
-                    ColumnSpacing = 10,
-                    Children = { skinBtn, capeBtn.With(column: 1) }
+                    ColumnDefinitions = new ColumnDefinitions("*,*,*"),
+                    ColumnSpacing = 8,
+                    Children = { skinBtn.With(column: 0), capeBtn.With(column: 1), resetBtn.With(column: 2) }
                 }
             }
         }, padding: new Thickness(24), margin: new Thickness(0));
 
-        var mainRow = new Grid
+        _avatarGlass = avatarPanel;
+        _avatarControls = (StackPanel)avatarPanel.Child!;
+        _avatarActions = (Grid)_avatarControls.Children[3];
+
+        _avatarGlass.PointerEntered += (s, e) => { if (_isNarrowMode) SetAvatarExpansion(true); };
+        _avatarGlass.PointerExited += (s, e) => { if (_isNarrowMode) SetAvatarExpansion(false); };
+
+        _mainContentStack = new StackPanel
         {
-            ColumnDefinitions = new ColumnDefinitions("*,Auto"),
+            Spacing = 40,
+            VerticalAlignment = VerticalAlignment.Top,
+            Margin = new Thickness(0, 48, 0, 0),
             Children =
             {
-                new StackPanel
+                topInfo,
+                new StackPanel 
                 {
-                    Spacing = 40,
-                    Children =
-                    {
-                        topInfo,
-                        new StackPanel
-                        {
-                            Orientation = Orientation.Horizontal,
-                            Spacing = 16,
-                            Children = { _playOverlay, actionsGroup }
-                        }
-                    }
+                    Orientation = Orientation.Horizontal,
+                    Spacing = 16,
+                    Children = { _playOverlay, actionsGroup }
                 },
-                avatarPanel.With(column: 1)
+                BuildFeaturedServersSection()
+            }
+        };
+
+        var mainRow = new Grid
+        {
+            Children =
+            {
+                _mainContentStack,
+                avatarPanel.With(a => {
+                    a.HorizontalAlignment = HorizontalAlignment.Right;
+                    a.VerticalAlignment = VerticalAlignment.Top;
+                    a.ZIndex = 10;
+                })
             }
         };
 
@@ -1316,8 +2050,8 @@ public sealed class MainWindow : Window
             ColumnSpacing = 20,
             Children =
             {
-                Create1to1StatCard("FPS ◆", homeFpsStatValue, "10% ◆", "144"),
-                Create1to1StatCard("RAM ◆", homeRamStatValue, "Allocated", "4 GB").With(column: 1)
+                Create1to1StatCard("FPS", homeFpsStatValue, "Average performance"),
+                Create1to1StatCard("RAM", homeRamStatValue, "Memory usage").With(column: 1)
             }
         };
 
@@ -1363,16 +2097,7 @@ public sealed class MainWindow : Window
                                 pb.Height = 14;
                                 pb.CornerRadius = new CornerRadius(7);
                                 pb.Background = new SolidColorBrush(Color.Parse("#1A1F2E"));
-                                pb.Foreground = new LinearGradientBrush
-                                {
-                                    StartPoint = new RelativePoint(0, 0.5, RelativeUnit.Relative),
-                                    EndPoint = new RelativePoint(1, 0.5, RelativeUnit.Relative),
-                                    GradientStops =
-                                    {
-                                        new GradientStop(Color.Parse("#6E5BFF"), 0),
-                                        new GradientStop(Color.Parse("#38D6C4"), 1)
-                                    }
-                                };
+                                pb.Foreground = new SolidColorBrush(Color.Parse(_settings.AccentColor));
                             })
                         }
                     }
@@ -1399,23 +2124,24 @@ public sealed class MainWindow : Window
         };
     }
 
-    private Border Create1to1StatCard(string title, TextBlock valueBlock, string subLabel, string defaultValue)
+    private Border Create1to1StatCard(string title, TextBlock valueBlock, string subLabel)
     {
-        valueBlock.Text = defaultValue;
-        valueBlock.FontSize = 42;
+        var accentColor = Color.Parse(_settings.AccentColor);
+        valueBlock.FontSize = 32;
         valueBlock.FontWeight = FontWeight.Black;
-        valueBlock.Foreground = Brushes.White;
+        valueBlock.Foreground = new SolidColorBrush(accentColor);
+        valueBlock.Text = "00";
 
         return CreateGlassPanel(new StackPanel
         {
             Spacing = 6,
             Children =
             {
-                new TextBlock { Text = title, FontSize = 14, Foreground = new SolidColorBrush(Color.Parse("#8E96A8")), FontWeight = FontWeight.Bold },
+                new TextBlock { Text = title, FontSize = 12.5, Foreground = new SolidColorBrush(Color.Parse("#8E96A8")), FontWeight = FontWeight.Bold },
                 valueBlock,
-                new TextBlock { Text = subLabel, FontSize = 13, Foreground = new SolidColorBrush(Color.Parse("#667899")) }
+                new TextBlock { Text = subLabel, FontSize = 11.5, Foreground = new SolidColorBrush(Color.Parse("#667899")) }
             }
-        }, padding: new Thickness(24), margin: new Thickness(0));
+        }, padding: new Thickness(16), margin: new Thickness(0));
     }
 
     private Control BuildModrinthDeck()
@@ -1459,7 +2185,7 @@ public sealed class MainWindow : Window
 
         modrinthSearchButton.CornerRadius = new CornerRadius(16);
         modrinthSearchButton.Height = 42;
-        modrinthSearchButton.Content = new TextBlock { Text = "🔍 Search", FontWeight = FontWeight.Bold, Foreground = Brushes.White, VerticalAlignment = VerticalAlignment.Center };
+        SetButtonText(modrinthSearchButton, "🔍 Search");
         modrinthSearchButton.Background = new LinearGradientBrush
         {
             StartPoint = new RelativePoint(0, 0, RelativeUnit.Relative),
@@ -1502,13 +2228,16 @@ public sealed class MainWindow : Window
 
         modrinthResultsListBox.Background = Brushes.Transparent;
         modrinthResultsListBox.ItemsPanel = new FuncTemplate<Panel?>(() => new Avalonia.Controls.Primitives.UniformGrid { Columns = 2 });
+        modrinthResultsListBox.ItemsSource = _searchResults;
         modrinthResultsListBox.Margin = new Thickness(4, 0);
 
         modrinthResultsListBox.ItemTemplate = new FuncDataTemplate<ModrinthProject>((project, _) =>
         {
+            bool isInstalled = _selectedProfile?.InstalledModIds.Contains(project?.ProjectId ?? "") ?? false;
             var installBtn = new Button
             {
-                Content = "Install",
+                Content = isInstalled ? "Installed" : "Install",
+                IsEnabled = !isInstalled,
                 Background = Brushes.Transparent,
                 Foreground = Brushes.White,
                 BorderBrush = new SolidColorBrush(Color.FromArgb(80, 255, 255, 255)),
@@ -1858,9 +2587,9 @@ public sealed class MainWindow : Window
             Margin = new Thickness(0, 12, 0, 0),
             Children =
             {
-                DetachFromParent(profileInspectorTitle),
-                DetachFromParent(profileInspectorMeta),
-                DetachFromParent(profileInspectorPath)
+                DetachFromParent(profileInspectorTitle)!,
+                DetachFromParent(profileInspectorMeta)!,
+                DetachFromParent(profileInspectorPath)!
             }
         };
 
@@ -2093,6 +2822,17 @@ public sealed class MainWindow : Window
         var tasks = new List<Task>();
         tasks.Add(CheckForUpdatesAsync());
         
+        tasks.Add(PerformFirstRunSetup());
+        await Task.WhenAll(tasks);
+
+        // Auto-refresh selected account if needed
+        var selectedAcc = _settings.Accounts.FirstOrDefault(a => a.Id == _settings.SelectedAccountId);
+        if (selectedAcc != null && selectedAcc.Provider == "microsoft" && selectedAcc.IsExpired)
+        {
+            LauncherLog.Info($"[Initialize] Selected account {selectedAcc.Username} expired. Attempting refresh...");
+            await TryRefreshAccountAsync(selectedAcc);
+        }
+        
         loadingLabel.Text = string.Empty;
         usernameInput.Text = _settings.Username;
         if (string.IsNullOrWhiteSpace(usernameInput.Text))
@@ -2107,9 +2847,14 @@ public sealed class MainWindow : Window
         RefreshProfiles();
         tasks.Add(ListVersionsAsync(GetSelectedVersionCategory()));
 
-        if (!string.IsNullOrEmpty(_settings.JvmArgs) && _settings.JvmArgs.Contains("--sun-misc-unsafe-memory-access=allow"))
+        if (!string.IsNullOrEmpty(_settings.JvmArgs) && (_settings.JvmArgs.Contains("--sun-misc-unsafe-memory-access") || _settings.JvmArgs.Contains("--enable-native-access")))
         {
-            _settings.JvmArgs = _settings.JvmArgs.Replace("--sun-misc-unsafe-memory-access=allow", "").Trim();
+            _settings.JvmArgs = _settings.JvmArgs
+                .Replace("--sun-misc-unsafe-memory-access=allow", "")
+                .Replace("--sun-misc-unsafe-memory-access", "")
+                .Replace("--enable-native-access=ALL-UNNAMED", "")
+                .Replace("--enable-native-access", "")
+                .Trim();
             _settingsStore.Save(_settings);
         }
 
@@ -2151,6 +2896,7 @@ public sealed class MainWindow : Window
         ApplyNavState(performanceNavButton, section == "performance");
         ApplyNavState(settingsNavButton, section == "settings");
         ApplyNavState(layoutNavButton, section == "layout");
+        if (accountsNavButton != null) ApplyNavState(accountsNavButton, section == "accounts");
 
         if (section == "modrinth" && _searchResults.Count == 0)
         {
@@ -2160,110 +2906,99 @@ public sealed class MainWindow : Window
 
     private async Task ListVersionsAsync(string category = "Versions")
     {
-        var items = new List<string>();
-
-        if (_settings.OfflineMode)
+        await _versionListSemaphore.WaitAsync();
+        try
         {
-            // Try to load only local versions from cache to avoid internet overhead
-            try 
+            var items = new List<string>();
+            VersionMetadataCollection? manifest = null;
+
+            if (!_settings.OfflineMode)
             {
-                var versionsDir = Path.Combine(_defaultMinecraftPath.BasePath, "versions");
-                if (Directory.Exists(versionsDir))
+                const int maxAttempts = 3;
+                for (int attempt = 1; attempt <= maxAttempts; attempt++)
                 {
-                    foreach (var dir in Directory.GetDirectories(versionsDir))
+                    try
                     {
-                        var versionName = Path.GetFileName(dir);
-                        if (!string.IsNullOrWhiteSpace(versionName))
+                        manifest = await _defaultLauncher.GetAllVersionsAsync();
+                        break;
+                    }
+                    catch (Exception) when (attempt < maxAttempts)
+                    {
+                        await Task.Delay(200 * attempt);
+                    }
+                }
+            }
+
+            if (manifest != null)
+            {
+                foreach (var version in manifest)
+                {
+                    if (version != null && ShouldIncludeVersion(version.Name, version.Type, category))
+                    {
+                        var vn = version.Name;
+                        if (!string.IsNullOrWhiteSpace(vn)) items.Add(vn);
+                    }
+                }
+            }
+            else
+            {
+                // Fallback: Scan local versions (for offline mode or internet failure)
+                try
+                {
+                    var versionsDir = Path.Combine(_defaultMinecraftPath.BasePath, "versions");
+                    if (File.Exists(versionsDir) || Directory.Exists(versionsDir))
+                    {
+                        foreach (var dir in Directory.GetDirectories(versionsDir))
                         {
-                            _versionItems.Add(versionName);
+                            var versionName = Path.GetFileName(dir);
+                            if (!string.IsNullOrWhiteSpace(versionName))
+                            {
+                                // In offline mode/not-manifested local folders, we try to guess the type from the name
+                                if (ShouldIncludeVersion(versionName, null, category))
+                                    items.Add(versionName);
+                            }
                         }
                     }
                 }
-                if (cbVersion.SelectedItem is null && _versionItems.Count > 0)
-                    cbVersion.SelectedItem = _versionItems[0];
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[Death Client] Offline version list failed: {ex}");
-            }
-            return;
-        }
-
-        const int maxAttempts = 3;
-        VersionMetadataCollection? manifest = null;
-
-        for (int attempt = 1; attempt <= maxAttempts; attempt++)
-        {
-            try
-            {
-                manifest = await _defaultLauncher.GetAllVersionsAsync();
-                break;
-            }
-            catch (Exception) when (attempt < maxAttempts)
-            {
-                await Task.Delay(200 * attempt);
-            }
-        }
-
-        if (manifest is null)
-        {
-            try 
-            {
-                var versionsDir = Path.Combine(_defaultMinecraftPath.BasePath, "versions");
-                if (Directory.Exists(versionsDir))
+                catch (Exception ex)
                 {
-                    foreach (var dir in Directory.GetDirectories(versionsDir))
-                    {
-                        var versionName = Path.GetFileName(dir);
-                        if (!string.IsNullOrWhiteSpace(versionName)) items.Add(versionName);
-                    }
+                    LauncherLog.Info($"[Death Client] Offline version list failed: {ex}");
                 }
             }
-            catch { }
-            return;
+
+            Dispatcher.UIThread.Post(() => {
+                _versionItems.Clear();
+                foreach (var item in items) 
+                {
+                    if (!_versionItems.Contains(item)) _versionItems.Add(item);
+                }
+
+                if (_selectedProfile is not null && !_versionItems.Contains(_selectedProfile.GameVersion))
+                    _versionItems.Insert(0, _selectedProfile.GameVersion);
+
+                if ((cbVersion.SelectedItem == null || (cbVersion.SelectedItem is string s && !_versionItems.Contains(s))) && _versionItems.Count > 0)
+                {
+                    try { 
+                        var latest = manifest?.FirstOrDefault(v => v.Type == "release")?.Name;
+                        cbVersion.SelectedItem = (latest != null && _versionItems.Contains(latest)) ? latest : _versionItems[0]; 
+                    } catch { cbVersion.SelectedIndex = 0; }
+                }
+            });
         }
-
-        if (manifest != null)
+        finally
         {
-            foreach (var version in manifest)
-        {
-            if (version is null || !ShouldIncludeVersion(version, category))
-                continue;
-
-            var vn = version.Name;
-            if (!string.IsNullOrWhiteSpace(vn)) items.Add(vn);
+            _versionListSemaphore.Release();
         }
     }
 
-        Dispatcher.UIThread.Post(() => {
-            _versionItems.Clear();
-            foreach (var item in items) 
-            {
-                if (!_versionItems.Contains(item)) _versionItems.Add(item);
-            }
-
-            if (_selectedProfile is not null && !_versionItems.Contains(_selectedProfile.GameVersion))
-                _versionItems.Insert(0, _selectedProfile.GameVersion);
-
-            if (cbVersion.SelectedItem is null && _versionItems.Count > 0)
-            {
-                try { 
-                    var latest = manifest?.FirstOrDefault(v => v.Type == "release")?.Name;
-                    cbVersion.SelectedItem = latest ?? _versionItems[0]; 
-                } catch { cbVersion.SelectedIndex = 0; }
-            }
-        });
-    }
-
-    private static bool ShouldIncludeVersion(IVersionMetadata version, string category)
+    private static bool ShouldIncludeVersion(string name, string? type, string category)
     {
-        var name = version.Name?.Trim() ?? string.Empty;
         if (string.IsNullOrWhiteSpace(name))
             return false;
 
-        var type = version.Type?.ToLower() ?? string.Empty;
-        var isRelease = type == "release" || Regex.IsMatch(name, @"^\d+(\.\d+)*$");
-        var isSnapshot = type == "snapshot" || Regex.IsMatch(name, @"^\d{2}w\d{2}[a-z]$", RegexOptions.IgnoreCase);
+        var t = type?.ToLower() ?? string.Empty;
+        var isRelease = t == "release" || Regex.IsMatch(name, @"^\d+(\.\d+)*$");
+        var isSnapshot = t == "snapshot" || Regex.IsMatch(name, @"^\d{2}w\d{2}[a-z]$", RegexOptions.IgnoreCase);
 
         if (string.Equals(category, "Versions", StringComparison.OrdinalIgnoreCase))
             return isRelease;
@@ -2271,6 +3006,7 @@ public sealed class MainWindow : Window
         if (string.Equals(category, "Snapshots", StringComparison.OrdinalIgnoreCase))
             return isSnapshot;
 
+        // "Other sources" category: anything that isn't a standard release or snapshot (like Forge, Fabric, older alphas, etc.)
         return !isRelease && !isSnapshot;
     }
 
@@ -2292,15 +3028,22 @@ public sealed class MainWindow : Window
             return;
         }
 
-        var targetLabel = _selectedProfile?.Name ?? versionToLaunch;
+        // [USER REQUEST] Remove confirmation popup for instant launch
+        /*
         var shouldLaunch = await DialogService.ShowConfirmAsync(
             this,
             "Launch confirmation",
             $"Launch {targetLabel} as {usernameInput.Text.Trim()}?");
         if (!shouldLaunch)
             return;
+        */
 
         ToggleBusyState(true, "Priming the launcher...");
+        btnStart.Content = "Cancel";
+        btnStart.IsEnabled = true; // Allow clicking "Cancel"
+
+        _launchCts = new CancellationTokenSource();
+        var token = _launchCts.Token;
 
         try
         {
@@ -2312,38 +3055,28 @@ public sealed class MainWindow : Window
 
             if (_selectedProfile is not null)
             {
-                await EnsureProfileReadyAsync(_selectedProfile, launcher, CancellationToken.None);
+                await EnsureProfileReadyAsync(_selectedProfile, launcher, token);
                 
-                // Ensure the Skin Shuffle ecosystem is installed automatically
+                // Ensure the required mods are installed automatically
                 var modsDir = Path.Combine(_selectedProfile.InstanceDirectory, "mods");
                 Directory.CreateDirectory(modsDir);
-                ToggleBusyState(true, "Checking Skin Shuffle dependencies...");
-                await InstallModIfMissingAsync("skinshuffle", _selectedProfile, modsDir, CancellationToken.None);
-                await InstallModIfMissingAsync("yacl", _selectedProfile, modsDir, CancellationToken.None);
+                LauncherLog.Info($"[Launch] Autoinstalling required mods for instance: {_selectedProfile.Name}");
                 
-                // Also resolve missing user EMF requirement that crashed earlier
-                await InstallModIfMissingAsync("entity_model_features", _selectedProfile, modsDir, CancellationToken.None);
-                await InstallModIfMissingAsync("entity_texture_features", _selectedProfile, modsDir, CancellationToken.None);
+                // Custom Skin Loader is always required
+                await InstallModIfMissingAsync("customskinloader", _selectedProfile, modsDir, token);
 
-                // Auto-copy local custom brand mod
-                try {
-                    var customModPath = Path.GetFullPath(Path.Combine(Directory.GetCurrentDirectory(), "death-client-mod", "build", "libs", "death-client-mod-1.0.0.jar"));
-                    if (File.Exists(customModPath)) {
-                        File.Copy(customModPath, Path.Combine(modsDir, "death-client-mod-1.0.0.jar"), true);
-                    }
-                } catch { }
-
+                // FancyMenu integration if enabled
                 if (_settings.EnableFancyMenu && SupportsFancyMenu(_selectedProfile))
                 {
-                    ToggleBusyState(true, "Installing FancyMenu...");
-                    await EnsureFancyMenuInstalledAsync(_selectedProfile, CancellationToken.None);
+                    await InstallModIfMissingAsync("fancymenu", _selectedProfile, modsDir, token);
+                    await InstallModIfMissingAsync("konkrete", _selectedProfile, modsDir, token);
                 }
                 
                 versionToLaunch = _selectedProfile.VersionId;
             }
             else
             {
-                await launcher.InstallAsync(versionToLaunch);
+                await launcher.InstallAsync(versionToLaunch, token);
             }
 
             var username = usernameInput.Text.Trim();
@@ -2353,7 +3086,7 @@ public sealed class MainWindow : Window
                 : _playerUuid;
 
             var targetGameVer = _selectedProfile?.GameVersion ?? versionToLaunch;
-            var javaPath = await GetJavaPathForVersionAsync(targetGameVer, CancellationToken.None);
+            var javaPath = await GetJavaPathForVersionAsync(targetGameVer, token);
             var effectiveGamePath = _selectedProfile is not null && !string.IsNullOrWhiteSpace(_selectedProfile.GameDirectoryOverride)
                 ? _selectedProfile.GameDirectoryOverride
                 : launcherPath.BasePath;
@@ -2367,19 +3100,50 @@ public sealed class MainWindow : Window
                 MaximumRamMb = _settings.MaxRamMb,
                 ExtraJvmArguments = string.IsNullOrWhiteSpace(_settings.JvmArgs)
                     ? Array.Empty<MArgument>()
-                    : _settings.JvmArgs.Split(' ', StringSplitOptions.RemoveEmptyEntries).Select(arg => new MArgument(arg)),
+                    : _settings.JvmArgs.Split(' ', StringSplitOptions.RemoveEmptyEntries)
+                        .Where(arg => !arg.Contains("--sun-misc-unsafe-memory-access") && !arg.Contains("--enable-native-access")) // Strip recognized JVM killers
+                        .Select(arg => new MArgument(arg)),
                 ScreenWidth = _settings.WindowWidth,
                 ScreenHeight = _settings.WindowHeight,
                 Path = _selectedProfile is not null && !string.IsNullOrWhiteSpace(_selectedProfile.GameDirectoryOverride)
                     ? new MinecraftPath(_selectedProfile.GameDirectoryOverride)
                     : launcherPath
             });
+
+            // CRITICAL: Some versions have these flags hardcoded in their version JSON.
+            // We strip them from the FINAL command line here if they cause crashes.
+            var scrubbedArgs = process.StartInfo.Arguments;
+            string[] problematicFlags = { 
+                "--sun-misc-unsafe-memory-access=allow", 
+                "--enable-native-access=ALL-UNNAMED" 
+            };
+            
+            foreach (var flag in problematicFlags)
+            {
+                if (scrubbedArgs.Contains(flag))
+                {
+                    scrubbedArgs = scrubbedArgs.Replace(flag, "").Trim();
+                }
+            }
+            process.StartInfo.Arguments = scrubbedArgs;
+            process.StartInfo.CreateNoWindow = true;
+            process.StartInfo.UseShellExecute = false;
+
+            btnStart.Content = "Launching...";
+            btnStart.IsEnabled = false;
+            
+            token.ThrowIfCancellationRequested(); // Final check
             process.Start();
 
             _settings.Username = usernameInput.Text.Trim();
             _settings.Version = cbVersion.SelectedItem?.ToString() ?? string.Empty;
             _settingsStore.Save(_settings);
+            
             Close();
+        }
+        catch (OperationCanceledException)
+        {
+            LauncherLog.Info("[Launch] User cancelled the launch process.");
         }
         catch (Exception ex)
         {
@@ -2387,6 +3151,8 @@ public sealed class MainWindow : Window
         }
         finally
         {
+            _launchCts?.Dispose();
+            _launchCts = null;
             ToggleBusyState(false, "Ready to install or launch.");
         }
     }
@@ -2432,12 +3198,14 @@ public sealed class MainWindow : Window
             if (existingProfile is null)
             {
                 var downloadedProfile = _profileStore.CreateProfile($"Unnamed {versionToInstall}", versionToInstall, "vanilla");
-                RefreshProfiles(downloadedProfile);
+                Avalonia.Threading.Dispatcher.UIThread.Post(() => {
+                    RefreshProfiles(downloadedProfile);
+                    SetProgressState($"Downloaded {versionToInstall}.", 0, 0);
+                });
             }
 
             _settings.Version = versionToInstall;
             _settingsStore.Save(_settings);
-            SetProgressState($"Downloaded {versionToInstall}.", 0, 0);
         }
         catch (Exception ex)
         {
@@ -2628,16 +3396,30 @@ public sealed class MainWindow : Window
 
     private async Task<string> GetJavaPathForVersionAsync(string gameVersion, CancellationToken cancellationToken)
     {
-        int minorVersion = 8;
-        var parts = gameVersion.Split('.');
-        if (parts.Length >= 2 && int.TryParse(parts[1], out var parsedMinor))
-            minorVersion = parsedMinor;
-
         int requiredJavaVersion = 8;
-        if (minorVersion >= 21)
-            requiredJavaVersion = 21;
-        else if (minorVersion >= 17)
-            requiredJavaVersion = 17;
+        
+        // Handle standard 1.x.y versions
+        if (gameVersion.StartsWith("1."))
+        {
+            var parts = gameVersion.Split('.');
+            if (parts.Length >= 2 && int.TryParse(parts[1], out var minor))
+            {
+                if (minor >= 21) requiredJavaVersion = 21;
+                else if (minor >= 17) requiredJavaVersion = 17;
+                else if (minor >= 16) requiredJavaVersion = 16;
+            }
+        }
+        else 
+        {
+            // Handle custom modern versions like "26.1"
+            var parts = gameVersion.Split('.');
+            if (parts.Length >= 1 && int.TryParse(parts[0], out var major))
+            {
+                if (major >= 25) requiredJavaVersion = 25; // Java 25 for extremely modern builds (Class version 69.0)
+                else if (major >= 21) requiredJavaVersion = 21; 
+                else if (major >= 17) requiredJavaVersion = 17;
+            }
+        }
 
         var javaDir = Path.Combine(_defaultMinecraftPath.BasePath, "death-client", "runtimes", $"java-{requiredJavaVersion}");
         var javaExe = OperatingSystem.IsWindows() ? "java.exe" : "java";
@@ -2817,7 +3599,7 @@ public sealed class MainWindow : Window
 
     private void UpdateCharacterPreview()
     {
-        SyncSkinShuffleAvatarToLauncher();
+        // Removed SkinShuffle Sync
         
         var skinPath = _settings.CustomSkinPath;
         if (string.IsNullOrEmpty(skinPath) || !File.Exists(skinPath))
@@ -2841,7 +3623,7 @@ public sealed class MainWindow : Window
                 var bodyBmp = new RenderTargetBitmap(new PixelSize(16, 32));
                 using (var ctx = bodyBmp.CreateDrawingContext())
                 {
-                    // === Head (base layer: 8,8 size 8x8) ===
+                    // Head (base layer: 8,8 size 8x8)
                     ctx.DrawImage(fullSkin, new Rect(8, 8, 8, 8), new Rect(4, 0, 8, 8));
                     // Head overlay (40,8 size 8x8)
                     ctx.DrawImage(fullSkin, new Rect(40, 8, 8, 8), new Rect(4, 0, 8, 8));
@@ -2900,19 +3682,38 @@ public sealed class MainWindow : Window
         RenderOptions.SetBitmapInterpolationMode(characterImage, Avalonia.Media.Imaging.BitmapInterpolationMode.LowQuality);
         var selectedVersion = _selectedProfile?.GameVersion ?? cbVersion.SelectedItem?.ToString() ?? string.Empty;
         var resourceName = Character.GetCharacterResourceNameFromUuidAndGameVersion(_playerUuid, selectedVersion);
-        
         string? imagePath = null;
+        
         if (!string.IsNullOrWhiteSpace(resourceName))
         {
-            imagePath = Path.Combine(AppContext.BaseDirectory, "Resources", $"{resourceName}.png");
-            if (!File.Exists(imagePath))
-                imagePath = Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "Resources", $"{resourceName}.png");
+            var searchFolders = new[] 
+            {
+                Path.Combine(AppContext.BaseDirectory, "Resources"),
+                Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "Resources"),
+                Path.Combine(Directory.GetCurrentDirectory(), "Resources")
+            };
+
+            foreach (var folder in searchFolders)
+            {
+                var p = Path.Combine(folder, $"{resourceName}.png");
+                if (File.Exists(p))
+                {
+                    imagePath = p;
+                    break;
+                }
+            }
         }
 
         if (imagePath != null && File.Exists(imagePath))
-            characterImage.Source = new Bitmap(imagePath);
+        {
+            try {
+                characterImage.Source = new Bitmap(imagePath);
+            } catch { characterImage.Source = null; }
+        }
         else
+        {
             characterImage.Source = null;
+        }
     }
 
     private void _launcher_FileProgressChanged(object? sender, InstallerProgressChangedEventArgs args)
@@ -2968,38 +3769,48 @@ public sealed class MainWindow : Window
         SyncModrinthFilters();
         UpdateCharacterPreview();
         RefreshModsList();
+        UpdateSelectedProjectDetails();
+        RefreshSearchList();
     }
 
     private void RefreshModsList()
     {
-        _modItems.Clear();
-        if (_selectedProfile == null || !Directory.Exists(_selectedProfile.ModsDirectory))
-            return;
-
-        try
+        Avalonia.Threading.Dispatcher.UIThread.Post(() =>
         {
-            var files = Directory.GetFiles(_selectedProfile.ModsDirectory, "*.jar*");
-            foreach (var file in files)
+            _modItems.Clear();
+            if (_selectedProfile == null) return;
+            var modsDir = _selectedProfile.ModsDirectory;
+            if (!Directory.Exists(modsDir)) return;
+
+            try
             {
-                if (!file.EndsWith(".jar") && !file.EndsWith(".jar.disabled"))
-                    continue;
-
-                var info = new FileInfo(file);
-                string sizeStr = info.Length < 1024 * 1024 
-                    ? $"{info.Length / 1024} KB" 
-                    : $"{info.Length / 1024 / 1024.0:F1} MB";
-
-                var modItem = new ModItem
+                var files = Directory.GetFiles(modsDir);
+                int count = 0;
+                foreach (var file in files)
                 {
-                    FileName = info.Name,
-                    FileSize = sizeStr,
-                    FullPath = file
-                };
-                modItem.InitState(!info.Name.EndsWith(".disabled"));
-                _modItems.Add(modItem);
+                    if (!file.EndsWith(".jar", StringComparison.OrdinalIgnoreCase) && 
+                        !file.EndsWith(".jar.disabled", StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    var item = new ModItem
+                    {
+                        FileName = Path.GetFileName(file),
+                        FileSize = new FileInfo(file).Length / 1024 + " KB",
+                        FullPath = file
+                    };
+                    // CRITICAL: Initialize the state based on extension, otherwise it defaults to Disabled
+                    item.InitState(!file.EndsWith(".disabled", StringComparison.OrdinalIgnoreCase));
+                    
+                    _modItems.Add(item);
+                    count++;
+                }
+                LauncherLog.Info($"[ModsList] Loaded {count} mods for {_selectedProfile.Name}.");
             }
-        }
-        catch { }
+            catch (Exception ex)
+            {
+                LauncherLog.Error($"[ModsList] Refresh failed for {_selectedProfile.Name}", ex);
+            }
+        });
     }
 
     private void ClearSelectedProfile()
@@ -3039,7 +3850,7 @@ public sealed class MainWindow : Window
             activeProfileBadge.Text = "HOME";
             activeContextLabel.Text = string.Empty;
             installModeLabel.Text = "Default";
-            btnStart.Content = "▶ Play";
+            SetButtonText(btnStart, "▶ Play");
             profileInspectorTitle.Text = "Standard Profile";
             profileInspectorMeta.Text = "No isolated profile is active. Mods install only after you create or select a profile.";
             profileInspectorPath.Text = $"Instances root: {_profileStore.GetInstancesRoot()}";
@@ -3047,10 +3858,13 @@ public sealed class MainWindow : Window
             renameProfileButton.IsEnabled = false;
             heroInstanceLabel.Text = "Standard Play";
             heroPerformanceLabel.Text = $"{cbVersion.SelectedItem?.ToString() ?? "1.21.1"} • Ready";
-            homeFpsStatValue.Text = "144";
-            homeRamStatValue.Text = "2 GB";
-            performanceFpsStatValue.Text = "144";
-            performanceRamStatValue.Text = "2 GB";
+            var ramGbInit = _settings.MaxRamMb / 1024.0;
+            var expectedFpsInit = Math.Round(ramGbInit * 41.25).ToString();
+            var expectedRamInit = $"{Math.Round(ramGbInit, 1)} GB";
+            homeFpsStatValue.Text = expectedFpsInit;
+            homeRamStatValue.Text = expectedRamInit;
+            performanceFpsStatValue.Text = expectedFpsInit;
+            performanceRamStatValue.Text = expectedRamInit;
             return;
         }
 
@@ -3065,8 +3879,9 @@ public sealed class MainWindow : Window
         renameProfileButton.IsEnabled = true;
         heroInstanceLabel.Text = _selectedProfile.Name;
         heroPerformanceLabel.Text = $"{_selectedProfile.GameVersion} • Ready";
-        var fpsText = _selectedProfile.Loader == "vanilla" ? "165" : "120";
-        var ramText = _selectedProfile.Loader == "vanilla" ? "2 GB" : "4 GB";
+        var ramGb = _settings.MaxRamMb / 1024.0;
+        var fpsText = Math.Round(ramGb * (_selectedProfile.Loader == "vanilla" ? 41.25 : 30)).ToString();
+        var ramText = $"{Math.Round(ramGb, 1)} GB";
         homeFpsStatValue.Text = fpsText;
         homeRamStatValue.Text = ramText;
         performanceFpsStatValue.Text = fpsText;
@@ -3078,7 +3893,9 @@ public sealed class MainWindow : Window
 
     private void SyncModrinthFilters()
     {
-        modrinthVersionInput.Text = _selectedProfile?.GameVersion ?? cbVersion.SelectedItem?.ToString() ?? string.Empty;
+        var rawVersion = _selectedProfile?.GameVersion ?? cbVersion.SelectedItem?.ToString() ?? string.Empty;
+        // Basic cleanup: if they have "1.21.11" it might be a typo for "1.21.1" or they mean something else
+        modrinthVersionInput.Text = rawVersion;
         var loader = _selectedProfile?.Loader ?? "vanilla";
 
         var selectedIndex = Array.FindIndex(LoaderOptions, option => string.Equals(option, loader, StringComparison.OrdinalIgnoreCase));
@@ -3117,7 +3934,6 @@ public sealed class MainWindow : Window
                 loaderVersion = await ResolveLatestNeoForgeVersionAsync(selectedVersion, CancellationToken.None);
 
             var profile = _profileStore.CreateProfile(profileNameInput.Text.Trim(), selectedVersion, loader, loaderVersion, null, profileGameDirInput.Text?.Trim());
-            
             if (loader == "fabric")
                 await EnsureFabricProfileAsync(profile, CancellationToken.None);
             else if (loader == "quilt")
@@ -3125,10 +3941,23 @@ public sealed class MainWindow : Window
             else if (loader == "forge" || loader == "neoforge")
                 await EnsureForgeProfileAsync(profile, CancellationToken.None);
 
-            RefreshProfiles(profile);
-            profileNameInput.Text = string.Empty;
-            _instanceEditorOverlay.IsVisible = false;
-            SetProgressState($"Profile {profile.Name} is ready.", 0, 0);
+            // Ensure the required mods are installed automatically immediately
+            var modsDir = Path.Combine(profile.InstanceDirectory, "mods");
+            Directory.CreateDirectory(modsDir);
+            await InstallModIfMissingAsync("customskinloader", profile, modsDir, CancellationToken.None);
+            if (_settings.EnableFancyMenu && SupportsFancyMenu(profile))
+            {
+                await InstallModIfMissingAsync("fancymenu", profile, modsDir, CancellationToken.None);
+                await InstallModIfMissingAsync("konkrete", profile, modsDir, CancellationToken.None);
+            }
+
+            Avalonia.Threading.Dispatcher.UIThread.Post(() => {
+                RefreshProfiles(profile);
+                UpdateSelectedProjectDetails();
+                profileNameInput.Text = string.Empty;
+                _instanceEditorOverlay.IsVisible = false;
+                SetProgressState($"Profile {profile.Name} is ready.", 0, 0);
+            });
         }
         catch (Exception ex)
         {
@@ -3221,13 +4050,26 @@ public sealed class MainWindow : Window
             else if (loader == "forge" || loader == "neoforge")
                 await EnsureForgeProfileAsync(profile, CancellationToken.None);
 
+            // Ensure the required mods are installed automatically immediately
+            var modsDir = Path.Combine(profile.InstanceDirectory, "mods");
+            Directory.CreateDirectory(modsDir);
+            await InstallModIfMissingAsync("customskinloader", profile, modsDir, CancellationToken.None);
+            if (_settings.EnableFancyMenu && SupportsFancyMenu(profile))
+            {
+                await InstallModIfMissingAsync("fancymenu", profile, modsDir, CancellationToken.None);
+                await InstallModIfMissingAsync("konkrete", profile, modsDir, CancellationToken.None);
+            }
+
             // Pre-download the game files
             var launcherPath = new MinecraftPath(profile.InstanceDirectory);
             var launcher = CreateLauncher(launcherPath);
             await launcher.InstallAsync(version);
 
-            RefreshProfiles(profile);
-            SetProgressState($"Instance \"{autoName}\" ready to play!", 0, 0);
+            Avalonia.Threading.Dispatcher.UIThread.Post(() => {
+                RefreshProfiles(profile);
+                UpdateSelectedProjectDetails();
+                SetProgressState($"Instance \"{autoName}\" ready to play!", 0, 0);
+            });
         }
         catch (Exception ex)
         {
@@ -3295,7 +4137,9 @@ public sealed class MainWindow : Window
         try
         {
             ToggleBusyState(true, $"Installing {project.Title}...");
-            await InstallSelectedModAsync(project, CancellationToken.None);
+            await InstallSelectedModAsync(project, CancellationToken.None, null); // We don't have a specific button here easily accessible, button is usually in the search results
+            RefreshModsList();
+            UpdateSelectedProjectDetails();
             SetProgressState($"Installed {project.Title}!", 0, 0);
         }
         catch (Exception ex)
@@ -3404,6 +4248,10 @@ public sealed class MainWindow : Window
 
         try
         {
+            // Re-bind ItemsSource in case AXAML re-created the controls
+            modrinthResultsListBox.ItemsSource = _searchResults;
+            _quickModResults.ItemsSource = _quickSearchResults;
+
             ToggleBusyState(true, "Searching across platforms...");
 
             var projectType = modrinthProjectTypeCombo.SelectedItem?.ToString()?.ToLowerInvariant() ?? "mod";
@@ -3458,19 +4306,22 @@ public sealed class MainWindow : Window
 
     private void BindSearchResults(IReadOnlyList<ModrinthProject> results)
     {
-        _searchResults.Clear();
-        foreach (var result in results)
-            _searchResults.Add(result);
+        Avalonia.Threading.Dispatcher.UIThread.Post(() =>
+        {
+            _searchResults.Clear();
+            foreach (var result in results)
+                _searchResults.Add(result);
 
         modrinthResultsSummary.Text = results.Count == 0
             ? "No matching projects were found for the current filters."
             : $"Found {results.Count} result{(results.Count == 1 ? string.Empty : "s")} for {modrinthProjectTypeCombo.SelectedItem?.ToString()?.ToLowerInvariant() ?? "projects"}.";
         modrinthResultsListBox.SelectedItem = _searchResults.FirstOrDefault();
-        if (_searchResults.Count == 0)
-        {
-            modrinthDetailsBox.Text = "No matching Modrinth projects found for the current filters.";
-            installSelectedButton.IsEnabled = false;
-        }
+            if (_searchResults.Count == 0)
+            {
+                modrinthDetailsBox.Text = "No matching projects found. Check your filters (e.g. Version/Loader).";
+                installSelectedButton.IsEnabled = false;
+            }
+        });
     }
 
     private Control BuildLayoutDeck()
@@ -3535,7 +4386,14 @@ public sealed class MainWindow : Window
                 new StackPanel { Orientation = Orientation.Horizontal, Spacing = 10, Children = {
                     CreatePrimaryButton("Import Custom Layout", "#6E5BFF", Colors.White).With(btn => {
                         btn.Click += async (_, _) => await ImportLayoutAsync();
-                    })
+                    }),
+                    new TextBlock { 
+                        Text = "• Recommended: Use layouts from the official website only.", 
+                        Foreground = new SolidColorBrush(Color.Parse("#FFB85B")), 
+                        FontSize = 12, 
+                        FontStyle = FontStyle.Italic,
+                        VerticalAlignment = VerticalAlignment.Center 
+                    }
                 }},
                 new StackPanel
                 {
@@ -3683,6 +4541,7 @@ public sealed class MainWindow : Window
         btn.Click += (_, _) => {
             _settings.AccentColor = hex;
             _settingsStore.Save(_settings);
+            InvalidateUiCache();
             Content = BuildRoot();
             SetActiveSection("layout");
         };
@@ -3697,8 +4556,16 @@ public sealed class MainWindow : Window
             return;
         }
 
-        installSelectedButton.IsEnabled = true;
-        installSelectedButton.Content = project.ProjectType == "modpack" ? "↓ Pack" : "↓ Mod";
+        bool isInstalled = _selectedProfile?.InstalledModIds.Contains(project.ProjectId) ?? false;
+        installSelectedButton.IsEnabled = !isInstalled;
+        if (isInstalled)
+        {
+            SetButtonText(installSelectedButton, "Installed");
+        }
+        else
+        {
+            SetButtonText(installSelectedButton, project.ProjectType == "modpack" ? "↓ Pack" : "↓ Mod");
+        }
         modrinthResultsSummary.Text = $"Selected {project.Title} by {project.Author}.";
         modrinthDetailsBox.Text =
             $"{project.Title}\n" +
@@ -3708,6 +4575,17 @@ public sealed class MainWindow : Window
             $"Followers: {project.Follows:N0}\n" +
             $"Categories: {string.Join(", ", project.Categories)}\n\n" +
             $"{project.Description}";
+    }
+
+    private void RefreshSearchList()
+    {
+        var items = modrinthResultsListBox.ItemsSource as IEnumerable<ModrinthProject>;
+        if (items != null)
+        {
+            var list = items.ToList();
+            modrinthResultsListBox.ItemsSource = null;
+            modrinthResultsListBox.ItemsSource = list;
+        }
     }
 
     private async Task InstallSelectedAsync()
@@ -3722,7 +4600,11 @@ public sealed class MainWindow : Window
             if (project.ProjectType == "modpack")
                 await InstallModpackFromProjectAsync(project, CancellationToken.None);
             else
-                await InstallSelectedModAsync(project, CancellationToken.None);
+                await InstallSelectedModAsync(project, CancellationToken.None, installSelectedButton);
+
+            RefreshModsList();
+            UpdateSelectedProjectDetails();
+            SetButtonProgress(installSelectedButton, 0, false);
         }
         catch (Exception ex)
         {
@@ -3734,7 +4616,7 @@ public sealed class MainWindow : Window
         }
     }
 
-    private async Task InstallSelectedModAsync(ModrinthProject project, CancellationToken cancellationToken)
+    private async Task InstallSelectedModAsync(ModrinthProject project, CancellationToken cancellationToken, Button? targetButton = null)
     {
         if (_selectedProfile is null)
         {
@@ -3744,7 +4626,7 @@ public sealed class MainWindow : Window
 
         if (project.IsCurseForge)
         {
-            await InstallCurseForgeModAsync(project, cancellationToken);
+            await InstallCurseForgeModAsync(project, cancellationToken, targetButton);
             return;
         }
 
@@ -3754,11 +4636,14 @@ public sealed class MainWindow : Window
             throw new InvalidOperationException($"No compatible version was found for {_selectedProfile.LoaderDisplay}.");
 
         var installed = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { project.ProjectId };
-        await InstallModVersionAsync(_selectedProfile, version, installed, cancellationToken);
-        SetProgressState($"Installed {project.Title} into {_selectedProfile.Name}.", 0, 0);
+        await InstallModVersionAsync(_selectedProfile, version, installed, cancellationToken, targetButton, project.ProjectId);
+        Avalonia.Threading.Dispatcher.UIThread.Post(() => {
+            SetProgressState($"Installed {project.Title} into {_selectedProfile.Name}.", 0, 0);
+            RefreshSearchList();
+        });
     }
 
-    private async Task InstallCurseForgeModAsync(ModrinthProject project, CancellationToken cancellationToken)
+    private async Task InstallCurseForgeModAsync(ModrinthProject project, CancellationToken cancellationToken, Button? targetButton = null)
     {
         var files = await _curseForgeClient.GetProjectVersionsAsync(project.ProjectId, _selectedProfile!.GameVersion, _selectedProfile.Loader, cancellationToken);
         var file = files.FirstOrDefault();
@@ -3772,14 +4657,18 @@ public sealed class MainWindow : Window
         if (string.IsNullOrEmpty(file.DownloadUrl))
             throw new InvalidOperationException("This mod has downloads disabled for 3rd party launchers on CurseForge.");
 
-        await _curseForgeClient.DownloadFileAsync(file.DownloadUrl, dest, null, cancellationToken);
+        await _curseForgeClient.DownloadFileAsync(file.DownloadUrl, dest, CreateDownloadProgress(file.FileName, targetButton), cancellationToken);
+        
+        _selectedProfile.InstalledModIds.Add(project.ProjectId);
+        _profileStore.Save(_selectedProfile);
+        
         SetProgressState($"Installed {project.Title} (CurseForge) into {_selectedProfile.Name}.", 0, 0);
     }
 
     private static bool HasPrimaryFile(ModrinthProjectVersion version) =>
         version.Files.Any(file => file.Primary && file.Filename.EndsWith(".jar", StringComparison.OrdinalIgnoreCase));
 
-    private async Task InstallModVersionAsync(LauncherProfile profile, ModrinthProjectVersion version, HashSet<string> installedProjectIds, CancellationToken cancellationToken)
+    private async Task InstallModVersionAsync(LauncherProfile profile, ModrinthProjectVersion version, HashSet<string> installedProjectIds, CancellationToken cancellationToken, Button? targetButton = null, string? projectId = null)
     {
         foreach (var dependency in version.Dependencies.Where(d => d.DependencyType == "required" && !string.IsNullOrWhiteSpace(d.ProjectId)))
         {
@@ -3789,7 +4678,7 @@ public sealed class MainWindow : Window
             var dependencyVersions = await _modrinthClient.GetProjectVersionsAsync(dependency.ProjectId!, profile.GameVersion, profile.Loader, cancellationToken);
             var dependencyVersion = dependencyVersions.FirstOrDefault(HasPrimaryFile) ?? dependencyVersions.FirstOrDefault();
             if (dependencyVersion is not null)
-                await InstallModVersionAsync(profile, dependencyVersion, installedProjectIds, cancellationToken);
+                await InstallModVersionAsync(profile, dependencyVersion, installedProjectIds, cancellationToken, targetButton, dependency.ProjectId);
         }
 
         var file = version.Files.FirstOrDefault(f => f.Primary) ?? version.Files.FirstOrDefault();
@@ -3798,8 +4687,13 @@ public sealed class MainWindow : Window
 
         Directory.CreateDirectory(profile.ModsDirectory);
         var destinationPath = Path.Combine(profile.ModsDirectory, file.Filename);
-        await _modrinthClient.DownloadFileAsync(file.Url, CreateDownloadDestination(destinationPath), CreateDownloadProgress(file.Filename), cancellationToken);
+        await _modrinthClient.DownloadFileAsync(file.Url, CreateDownloadDestination(destinationPath), CreateDownloadProgress(file.Filename, targetButton), cancellationToken);
         await VerifyFileHashAsync(destinationPath, file.Hashes);
+        
+        var pid = projectId ?? version.ProjectId;
+        if (!string.IsNullOrEmpty(pid))
+            profile.InstalledModIds.Add(pid);
+            
         _profileStore.Save(profile);
     }
 
@@ -3942,10 +4836,11 @@ public sealed class MainWindow : Window
         else if (loader == "forge" || loader == "neoforge")
             await EnsureForgeProfileAsync(profile, cancellationToken);
 
-        _profileStore.Save(profile);
-        RefreshProfiles(profile);
-        SetActiveSection("profiles");
-        SetProgressState($"Installed modpack {profile.Name}.", 0, 0);
+        Avalonia.Threading.Dispatcher.UIThread.Post(() => {
+            RefreshProfiles(profile);
+            SetActiveSection("profiles");
+            SetProgressState($"Installed modpack {profile.Name}.", 0, 0);
+        });
     }
 
     private static void ExtractOverrideEntries(ZipArchive archive, string prefix, string destinationRoot)
@@ -3977,14 +4872,16 @@ public sealed class MainWindow : Window
         return fullPath;
     }
 
-    private Progress<(long BytesRead, long? TotalBytes)> CreateDownloadProgress(string fileName)
+    private Progress<(long BytesRead, long? TotalBytes)> CreateDownloadProgress(string fileName, Button? targetButton = null)
     {
         return new Progress<(long BytesRead, long? TotalBytes)>(progress =>
         {
             statusLabel.Text = $"Downloading {Path.GetFileName(fileName)}";
+            double percent = 0;
             if (progress.TotalBytes is long totalBytes && totalBytes > 0)
             {
-                pbProgress.Value = Math.Min(100, progress.BytesRead * 100d / totalBytes);
+                percent = progress.BytesRead * 100d / totalBytes;
+                pbProgress.Value = Math.Min(100, percent);
                 installDetailsLabel.Text = $"{FormatBytes(progress.BytesRead)} / {FormatBytes(totalBytes)}";
             }
             else
@@ -3992,12 +4889,25 @@ public sealed class MainWindow : Window
                 pbProgress.Value = 0;
                 installDetailsLabel.Text = $"{FormatBytes(progress.BytesRead)} downloaded";
             }
+
+            if (targetButton != null)
+            {
+                SetButtonProgress(targetButton, percent > 0 ? percent : 0, true);
+            }
         });
     }
 
     private void ToggleBusyState(bool isBusy, string statusText)
     {
         btnStart.IsEnabled = !isBusy && !string.IsNullOrWhiteSpace(usernameInput.Text);
+        if (isBusy)
+        {
+            btnStart.Content = "Cancel"; // Default busy state for launch
+        }
+        else
+        {
+            btnStart.Content = "▶ Play";
+        }
         downloadVersionButton.IsEnabled = !isBusy && _selectedProfile is null;
         createProfileButton.IsEnabled = !isBusy;
         modrinthSearchButton.IsEnabled = !isBusy;
@@ -4010,7 +4920,12 @@ public sealed class MainWindow : Window
         statusLabel.Text = statusText;
         if (_homeStatusBar != null) _homeStatusBar.IsVisible = isBusy;
         if (!isBusy)
+        {
             pbProgress.Value = 0;
+            if (installSelectedButton != null) SetButtonProgress(installSelectedButton, 0, false);
+            if (btnStart != null) SetButtonProgress(btnStart, 0, false);
+            if (modrinthSearchButton != null) SetButtonProgress(modrinthSearchButton, 0, false);
+        }
     }
 
     private void SetProgressState(string statusText, int fileProgress, int byteProgress)
@@ -4085,14 +5000,14 @@ public sealed class MainWindow : Window
                             Spacing = 14,
                             Children =
                             {
-                                heroInstanceLabel,
-                                heroPerformanceLabel,
+                                DetachFromParent(heroInstanceLabel)!,
+                                DetachFromParent(heroPerformanceLabel)!,
                                 new Border
                                 {
                                     Background = new SolidColorBrush(Color.FromArgb(64, 255, 255, 255)),
                                     CornerRadius = new CornerRadius(14),
                                     Padding = new Thickness(14, 10),
-                                    Child = usernameInput
+                                    Child = DetachFromParent(usernameInput)!
                                 },
                                 new Grid
                                 {
@@ -4390,9 +5305,33 @@ public sealed class MainWindow : Window
 
     private static Button CreatePrimaryButton(string text, string hexColor, Color foreground)
     {
+        var textBlock = new TextBlock
+        {
+            Text = text,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+
+        var progressBar = new ProgressBar
+        {
+            Height = 4,
+            VerticalAlignment = VerticalAlignment.Bottom,
+            Margin = new Thickness(0, 0, 0, 2),
+            IsVisible = false,
+            Background = Brushes.Transparent,
+            Foreground = new SolidColorBrush(Color.FromArgb(128, 255, 255, 255)),
+            CornerRadius = new CornerRadius(2)
+        };
+
+        var contentGrid = new Grid
+        {
+            Children = { textBlock, progressBar }
+        };
+
         var button = new Button
         {
-            Content = text,
+            Content = contentGrid,
+            Tag = progressBar, // Store progress bar for easy access
             Height = 50,
             Background = new SolidColorBrush(Color.Parse(hexColor)),
             Foreground = new SolidColorBrush(foreground),
@@ -4404,6 +5343,29 @@ public sealed class MainWindow : Window
         };
         ApplyHoverMotion(button);
         return button;
+    }
+
+    private static void SetButtonText(Button button, string text)
+    {
+        if (button.Content is Grid grid)
+        {
+            var textBlock = grid.Children.OfType<TextBlock>().FirstOrDefault();
+            if (textBlock != null)
+            {
+                textBlock.Text = text;
+                return;
+            }
+        }
+        button.Content = text;
+    }
+
+    private static void SetButtonProgress(Button button, double value, bool visible)
+    {
+        if (button.Tag is ProgressBar pb)
+        {
+            pb.Value = value;
+            pb.IsVisible = visible;
+        }
     }
 
     private static Button CreateNavButton(string icon, string label, bool compact = false)
@@ -4773,19 +5735,23 @@ public sealed class MainWindow : Window
         };
     }
 
-    private static void ApplyNavState(Button button, bool isActive)
+    private void ApplyNavState(Button button, bool isActive)
     {
-        var activeColor = Color.Parse("#7C5CFF");
+        // Don't override the background and specific styling for the global account badge
+        if (button == accountsNavButton) return;
+
+        var accentColor = Color.Parse(_settings.AccentColor);
 
         button.Background = isActive
-            ? new SolidColorBrush(Color.FromArgb(28, activeColor.R, activeColor.G, activeColor.B))
+            ? new SolidColorBrush(Color.FromArgb(32, accentColor.R, accentColor.G, accentColor.B))
             : Brushes.Transparent;
-        button.BorderBrush = isActive
-            ? new SolidColorBrush(Color.FromArgb(92, activeColor.R, activeColor.G, activeColor.B))
-            : Brushes.Transparent;
-        button.Foreground = new SolidColorBrush(isActive ? activeColor : Color.Parse("#A4A8B1"));
-        button.CornerRadius = new CornerRadius(14);
+        button.BorderBrush = new SolidColorBrush(accentColor);
+        button.BorderThickness = isActive ? new Thickness(0, 0, 0, 2) : new Thickness(0);
+        button.Foreground = isActive ? new SolidColorBrush(accentColor) : new SolidColorBrush(Color.Parse("#A4A8B1"));
+        button.CornerRadius = new CornerRadius(12, 12, 4, 4);
         button.Padding = new Thickness(16, 0);
+        button.FontSize = 14;
+        button.FontWeight = isActive ? FontWeight.Bold : FontWeight.Normal;
     }
 
     private static Border CreateStatTile(string title, TextBlock valueBlock, string subtitle)
@@ -4805,58 +5771,60 @@ public sealed class MainWindow : Window
             }
         });
     }
-
-    private async Task EnsureFancyMenuInstalledAsync(LauncherProfile profile, CancellationToken cancellationToken)
+    private async Task InstallModIfMissingAsync(string slug, LauncherProfile profile, string modsDir, CancellationToken cancellationToken, string? projectId = null)
     {
-        var modsDir = Path.Combine(profile.InstanceDirectory, "mods");
-        Directory.CreateDirectory(modsDir);
-
-        var fmDir = Path.Combine(profile.InstanceDirectory, "fancymenu");
-        Directory.CreateDirectory(fmDir);
-        Directory.CreateDirectory(Path.Combine(fmDir, "layouts"));
-        Directory.CreateDirectory(Path.Combine(fmDir, "assets"));
-
-        // Download FancyMenu and Konkrete if not present
-        await InstallModIfMissingAsync("fancymenu", profile, modsDir, cancellationToken);
-        await InstallModIfMissingAsync("konkrete", profile, modsDir, cancellationToken);
-
-        await WriteFancyMenuLayoutAsync(Path.Combine(fmDir, "layouts", "death_client_main.txt"), "main_menu", cancellationToken);
-        await WriteFancyMenuLayoutAsync(Path.Combine(fmDir, "layouts", "death_client_multiplayer.txt"), "multiplayer_menu", cancellationToken);
-        await WriteFancyMenuLayoutAsync(Path.Combine(fmDir, "layouts", "death_client_singleplayer.txt"), "select_world", cancellationToken);
-
-        // Copy background if exists
-        var customBgPath = Path.Combine(_defaultMinecraftPath.BasePath, "death-client", "custom_bg.png");
-        if (File.Exists(customBgPath))
+        try
         {
-            var fmAssetsDir = Path.Combine(fmDir, "assets", "death_client");
-            Directory.CreateDirectory(fmAssetsDir);
-            File.Copy(customBgPath, Path.Combine(fmAssetsDir, "bg.png"), true);
-        }
-    }
+            if (string.Equals(profile.Loader, "vanilla", StringComparison.OrdinalIgnoreCase))
+                return;
 
-    private static Task WriteFancyMenuLayoutAsync(string path, string target, CancellationToken cancellationToken)
-    {
-        var layoutContent =
-            "type: layout\n" +
-            $"layout_name: death_client_{target}\n" +
-            $"layout_target: {target}\n\n" +
-            "[background]\n" +
-            "background_type: image\n" +
-            "background_image: death_client/bg.png\n";
+            string targetId = projectId ?? slug;
+            if (profile.InstalledModIds.Contains(targetId))
+            {
+                LauncherLog.Info($"[ModInstaller] {targetId} is already tracked. Done.");
+                return;
+            }
 
-        return File.WriteAllTextAsync(path, layoutContent, cancellationToken);
-    }
+            // We search first to get the official Project ID if not provided.
+            LauncherLog.Info($"[ModInstaller] Resolving official ID for {slug} ({profile.GameVersion}/{profile.Loader})...");
+            var results = await _modrinthClient.SearchProjectsAsync(targetId, "mod", profile.GameVersion, profile.Loader, cancellationToken);
+            var project = results.FirstOrDefault(p => 
+                string.Equals(p.Slug, slug, StringComparison.OrdinalIgnoreCase) || 
+                string.Equals(p.ProjectId, slug, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(p.ProjectId, projectId, StringComparison.OrdinalIgnoreCase) ||
+                p.Title.Contains(slug, StringComparison.OrdinalIgnoreCase));
 
-    private async Task InstallModIfMissingAsync(string slug, LauncherProfile profile, string modsDir, CancellationToken cancellationToken)
-    {
-        var existing = Directory.GetFiles(modsDir, $"*{slug}*.jar");
-        if (existing.Length > 0) return;
+            if (project == null)
+            {
+                LauncherLog.Info($"[ModInstaller] Could not find {slug} on Modrinth. Skipping auto-install.");
+                return;
+            }
 
-        var results = await _modrinthClient.SearchProjectsAsync(slug, "mod", profile.GameVersion, profile.Loader, cancellationToken);
-        var project = results.FirstOrDefault(p => p.Slug == slug || p.Title.ToLowerInvariant().Contains(slug));
-        if (project != null)
-        {
+            if (profile.InstalledModIds.Contains(project.ProjectId))
+            {
+                LauncherLog.Info($"[ModInstaller] {project.Title} ({project.ProjectId}) is already tracked. Done.");
+                return;
+            }
+
+            // Check if the file already exists physically but isn't tracked yet
+            var existing = Directory.EnumerateFiles(modsDir, "*.jar")
+                .Any(f => Path.GetFileName(f).Contains(slug, StringComparison.OrdinalIgnoreCase));
+
+            if (existing)
+            {
+                LauncherLog.Info($"[ModInstaller] {project.Title} exists physically but wasn't tracked. Adding ID {project.ProjectId}.");
+                profile.InstalledModIds.Add(project.ProjectId);
+                _profileStore.Save(profile);
+                return;
+            }
+
+            LauncherLog.Info($"[ModInstaller] Found {project.Title}. Installing...");
             await InstallSelectedModAsync(project, cancellationToken);
+            LauncherLog.Info($"[ModInstaller] {project.Title} installed successfully.");
+        }
+        catch (Exception ex)
+        {
+            LauncherLog.Error($"[ModInstaller] Auto-installation of {slug} failed, but continuing instance operation.", ex);
         }
     }
 
@@ -5340,7 +6308,9 @@ public sealed class MainWindow : Window
                 _profileStore.Save(profile);
             });
 
-            RefreshProfiles();
+            Avalonia.Threading.Dispatcher.UIThread.Post(() => {
+                RefreshProfiles();
+            });
             await DialogService.ShowInfoAsync(this, "Import Success", "The profile has been imported successfully.");
         }
         catch (Exception ex) { await DialogService.ShowInfoAsync(this, "Import Failed", ex.Message); }
@@ -5376,8 +6346,10 @@ public sealed class MainWindow : Window
             profile.InstanceDirectory = folderPath; // Redirect to external path
             _profileStore.Save(profile);
             
-            RefreshProfiles(profile);
-            SetActiveSection("profiles");
+            Avalonia.Threading.Dispatcher.UIThread.Post(() => {
+                RefreshProfiles(profile);
+                SetActiveSection("profiles");
+            });
             await DialogService.ShowInfoAsync(this, "Import Success", $"Successfully imported {folderName} as an instance.");
         }
         catch (Exception ex)
@@ -5451,6 +6423,57 @@ public sealed class MainWindow : Window
         }
         catch (Exception ex) { await DialogService.ShowInfoAsync(this, "Scan Failed", ex.Message); }
     }
+    private void UpdateResponsiveLayout()
+    {
+        if (_avatarGlass == null || _avatarControls == null || _avatarActions == null || _mainContentStack == null) return;
+
+        double threshold = 1180; // Slightly higher threshold for safe floating
+        _isNarrowMode = this.Bounds.Width < threshold;
+
+        if (_isNarrowMode)
+        {
+            _mainContentStack.Margin = new Thickness(0); // Content fills screen
+            SetAvatarExpansion(false);
+        }
+        else
+        {
+            _mainContentStack.Margin = new Thickness(0, 0, 320, 0); // Content respects panel
+            _avatarGlass.Background = new LinearGradientBrush { 
+                GradientStops = { new GradientStop(Color.FromArgb(60, 25, 31, 56), 0), new GradientStop(Color.FromArgb(30, 15, 21, 36), 1) } 
+            };
+            _avatarGlass.BorderThickness = new Thickness(1);
+            _avatarGlass.IsHitTestVisible = true;
+            _avatarControls.Children[0].IsVisible = true;
+            _avatarControls.Children[2].IsVisible = true;
+            _avatarActions.IsVisible = true;
+            _avatarActions.Opacity = 1;
+        }
+    }
+
+    private void SetAvatarExpansion(bool expanded)
+    {
+        if (!_isNarrowMode || _avatarGlass == null || _avatarControls == null || _avatarActions == null) return;
+
+        if (expanded)
+        {
+            _avatarGlass.Background = new SolidColorBrush(Color.FromArgb(200, 9, 12, 18));
+            _avatarGlass.BorderThickness = new Thickness(1);
+            _avatarControls.Children[0].IsVisible = true;
+            _avatarControls.Children[2].IsVisible = true;
+            _avatarActions.IsVisible = true;
+            _avatarActions.Opacity = 1;
+        }
+        else
+        {
+            _avatarGlass.Background = Brushes.Transparent;
+            _avatarGlass.BorderThickness = new Thickness(0);
+            _avatarControls.Children[0].IsVisible = false;
+            _avatarControls.Children[2].IsVisible = false;
+            _avatarActions.IsVisible = false;
+            _avatarActions.Opacity = 0;
+        }
+    }
+
     private Color GetAccentColor(byte alpha)
     {
         try
@@ -5493,6 +6516,60 @@ public sealed class MainWindow : Window
     private async void QuickModSearchButton_Click(object? sender, Avalonia.Interactivity.RoutedEventArgs e) => await QuickModSearchAsync();
     private void ProfileListBox_SelectionChanged(object? sender, SelectionChangedEventArgs e) => ProfileListBox_SelectionChanged();
     private void ModrinthResultsListBox_SelectionChanged(object? sender, SelectionChangedEventArgs e) => UpdateSelectedProjectDetails();
+
+    private async Task PerformFirstRunSetup()
+    {
+        if (!_settings.IsFirstRun) return;
+
+        // Force reset IsFirstRun only once during development if needed
+        // _settings.IsFirstRun = true; 
+
+        // Core directory initialization (silent for all platforms)
+        // Core directory initialization in the central data directory
+        var directories = new[] 
+        { 
+            Path.Combine(AppRuntime.DataDirectory, "assets"), 
+            Path.Combine(AppRuntime.DataDirectory, "death-client"), 
+            Path.Combine(AppRuntime.DataDirectory, "node-skin-server"),
+            Path.Combine(AppRuntime.DataDirectory, "death-client-mod")
+        };
+        foreach (var dir in directories) if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
+
+        // Windows-only visual setup process
+        if (OperatingSystem.IsWindows())
+        {
+            LauncherLog.Info("Performing Windows first-run setup...");
+            var setupWin = new SetupWindow();
+
+            try 
+            {
+                await Dispatcher.UIThread.InvokeAsync(() => setupWin.Show());
+
+                var desktopPath = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
+                var exePath = Environment.ProcessPath;
+                if (!string.IsNullOrEmpty(exePath))
+                {
+                    var psCommand = $"$s=(New-Object -ComObject WScript.Shell).CreateShortcut('{Path.Combine(desktopPath, "Aether Launcher.lnk")}'); $s.TargetPath='{exePath}'; $s.Save()";
+                    Process.Start(new ProcessStartInfo 
+                    { 
+                        FileName = "powershell", 
+                        Arguments = $"-Command \"{psCommand}\"", 
+                        CreateNoWindow = true, 
+                        UseShellExecute = false 
+                    });
+                    LauncherLog.Info("Windows desktop shortcut created.");
+                }
+
+                await Task.Delay(4000); // Allow time to read disclaimer
+            }
+            catch (Exception ex) { LauncherLog.Error("Windows setup failed", ex); }
+            finally { await Dispatcher.UIThread.InvokeAsync(() => setupWin.Close()); }
+        }
+
+        _settings.IsFirstRun = false;
+        _settingsStore.Save(_settings);
+    }
+
     private async void PlayOverlay_PointerPressed(object? sender, PointerPressedEventArgs e)
     {
         if (!e.GetCurrentPoint(_playOverlay).Properties.IsLeftButtonPressed || !_playOverlay.IsEnabled)
@@ -5534,11 +6611,12 @@ public sealed class MainWindow : Window
 
 internal static class AvaloniaControlExtensions
 {
-    public static T With<T>(this T control, int row = -1, int column = -1, int columnSpan = 1) where T : Control
+    public static T With<T>(this T control, int row = -1, int column = -1, int columnSpan = 1, int rowSpan = 1) where T : Control
     {
         if (row >= 0) Grid.SetRow(control, row);
         if (column >= 0) Grid.SetColumn(control, column);
         if (columnSpan > 1) Grid.SetColumnSpan(control, columnSpan);
+        if (rowSpan > 1) Grid.SetRowSpan(control, rowSpan);
         return control;
     }
 
@@ -5547,4 +6625,13 @@ internal static class AvaloniaControlExtensions
         action(control);
         return control;
     }
+}
+
+public class RelayCommand : ICommand
+{
+    private readonly Action _execute;
+    public RelayCommand(Action execute) => _execute = execute;
+    public bool CanExecute(object? parameter) => true;
+    public void Execute(object? parameter) => _execute();
+    public event EventHandler? CanExecuteChanged { add { } remove { } }
 }

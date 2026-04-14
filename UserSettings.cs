@@ -64,6 +64,6 @@ internal sealed class UserSettings
     public string JvmArgs { get; set; } = "-XX:+UseG1GC -XX:+UnlockExperimentalVMOptions -Dsun.stdout.encoding=UTF-8";
     public int WindowWidth { get; set; } = 854;
     public int WindowHeight { get; set; } = 480;
-    public bool SidebarOnRight { get; set; } = false;
     public bool PerformanceMode { get; set; } = false;
+    public bool IsFirstRun { get; set; } = true;
 }

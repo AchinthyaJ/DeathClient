@@ -161,6 +161,7 @@ internal sealed class LauncherProfile
     public string InstanceDirectory { get; set; } = string.Empty;
     public string GameDirectoryOverride { get; set; } = string.Empty;
     public string JvmArguments { get; set; } = string.Empty;
+    public HashSet<string> InstalledModIds { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 
     public string ModsDirectory => Path.Combine(InstanceDirectory, "mods");
 

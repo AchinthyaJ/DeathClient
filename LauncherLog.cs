@@ -7,6 +7,7 @@ namespace OfflineMinecraftLauncher;
 internal static class LauncherLog
 {
     private static readonly object Sync = new();
+    public static event Action<string>? OnLog;
     private static readonly string BaseDirectory = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
         ".death-client");
@@ -53,8 +54,6 @@ internal static class LauncherLog
             }
         }
 
-        Console.WriteLine(line);
-        if (exception is not null)
-            Console.WriteLine(exception);
+        OnLog?.Invoke(line);
     }
 }

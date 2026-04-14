@@ -21,8 +21,7 @@ internal sealed class NodeSkinServerManager : IDisposable
 
     public NodeSkinServerManager()
     {
-        var basePath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".death-client");
-        _storageDirectory = Path.Combine(basePath, "skin-server");
+        _storageDirectory = Path.Combine(AppRuntime.DataDirectory, "skin-server");
         Directory.CreateDirectory(_storageDirectory);
     }
 

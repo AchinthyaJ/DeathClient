@@ -18,6 +18,7 @@ public partial class App : Application
     {
         if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
         {
+            desktop.ShutdownMode = ShutdownMode.OnLastWindowClose;
             desktop.MainWindow = new MainWindow();
             desktop.Exit += (_, _) => AppRuntime.SkinServer.Dispose();
             _ = StartSkinServerInBackgroundAsync();

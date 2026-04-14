@@ -35,12 +35,25 @@ internal sealed class ModrinthClient : IDisposable
 
         var encodedFacets = Uri.EscapeDataString(JsonSerializer.Serialize(facets));
         var encodedQuery = Uri.EscapeDataString(query.Trim());
-        var response = await _httpClient.GetAsync($"search?query={encodedQuery}&limit=24&index=downloads&facets={encodedFacets}", cancellationToken);
-        response.EnsureSuccessStatusCode();
+        try
+        {
+            var response = await _httpClient.GetAsync($"search?query={encodedQuery}&limit=24&index=downloads&facets={encodedFacets}", cancellationToken);
+            if (!response.IsSuccessStatusCode)
+            {
+                var error = await response.Content.ReadAsStringAsync(cancellationToken);
+                LauncherLog.Error($"[ModrinthClient] Search failed with {response.StatusCode}: {error}");
+                return [];
+            }
 
-        await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
-        var payload = await JsonSerializer.DeserializeAsync<ModrinthSearchResponse>(stream, _jsonOptions, cancellationToken);
-        return payload?.Hits ?? [];
+            await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+            var payload = await JsonSerializer.DeserializeAsync<ModrinthSearchResponse>(stream, _jsonOptions, cancellationToken);
+            return payload?.Hits ?? [];
+        }
+        catch (Exception ex)
+        {
+            LauncherLog.Error("[ModrinthClient] Search failed due to network error.", ex);
+            return [];
+        }
     }
 
     public async Task<IReadOnlyList<ModrinthProjectVersion>> GetProjectVersionsAsync(string projectIdOrSlug, string? gameVersion, string? loader, CancellationToken cancellationToken)

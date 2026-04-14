@@ -1,15 +1,21 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
 <PropertyGroup>
-  <OutputType>Exe</OutputType>
+    <OutputType>WinExe</OutputType>
   <TargetFramework>net8.0</TargetFramework>
   <Nullable>enable</Nullable>
   <ImplicitUsings>enable</ImplicitUsings>
   <ApplicationIcon>minecraft.ico</ApplicationIcon>
+  <AssemblyName>AetherLauncher</AssemblyName>
+  <Version>1.0.0</Version>
+  <Product>Aether Launcher</Product>
+  <Authors>Death Client Team</Authors>
+  <PackageId>AetherLauncher</PackageId>
 
   <PublishSingleFile>true</PublishSingleFile>
   <SelfContained>true</SelfContained>
   <IncludeAllContentForSelfExtract>true</IncludeAllContentForSelfExtract>
+  <InvariantGlobalization>true</InvariantGlobalization>
 </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Avalonia" Version="11.3.0" />
@@ -45,7 +51,7 @@
   <ItemGroup>
     <Content Include="minecraft.ico" />
     <Content Include="Resources\**\*.png">
-      <CopyToOutputDirectory>Preserv eNewest</CopyToOutputDirectory>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
   </ItemGroup>
 

@@ -16,6 +16,8 @@ internal sealed class LauncherAccount
     public string MinecraftAccessToken { get; set; } = string.Empty;
     public DateTime MinecraftAccessTokenExpiresUtc { get; set; }
     public DateTime UpdatedUtc { get; set; } = DateTime.UtcNow;
+
+    public bool IsExpired => Provider == "microsoft" && (DateTime.UtcNow.AddMinutes(5) >= MinecraftAccessTokenExpiresUtc);
 }
 
 internal sealed class DeviceCodeSession
@@ -30,8 +32,8 @@ internal sealed class DeviceCodeSession
 
 internal sealed class MinecraftAuthenticationService
 {
-    private const string DeviceCodeEndpoint = "https://login.microsoftonline.com/consumers/oauth2/v2.0/devicecode";
-    private const string TokenEndpoint = "https://login.microsoftonline.com/consumers/oauth2/v2.0/token";
+    private const string DeviceCodeEndpoint = "https://login.live.com/oauth20_connect.srf";
+    private const string TokenEndpoint = "https://login.live.com/oauth20_token.srf";
     private const string XboxAuthEndpoint = "https://user.auth.xboxlive.com/user/authenticate";
     private const string XstsAuthEndpoint = "https://xsts.auth.xboxlive.com/xsts/authorize";
     private const string MinecraftLoginEndpoint = "https://api.minecraftservices.com/authentication/login_with_xbox";
@@ -39,19 +41,31 @@ internal sealed class MinecraftAuthenticationService
     private const string MinecraftProfileEndpoint = "https://api.minecraftservices.com/minecraft/profile";
     private const string Scope = "XboxLive.signin offline_access";
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
-    private readonly HttpClient _httpClient = new();
+    private readonly HttpClient _httpClient;
+
+    public MinecraftAuthenticationService()
+    {
+        _httpClient = new HttpClient();
+        _httpClient.DefaultRequestHeaders.Add("User-Agent", "AetherLauncher/1.0.0");
+    }
 
     public async Task<DeviceCodeSession> BeginDeviceLoginAsync(string clientId, CancellationToken cancellationToken)
     {
         var form = new Dictionary<string, string>
         {
             ["client_id"] = clientId,
-            ["scope"] = Scope
+            ["scope"] = Scope,
+            ["response_type"] = "device_code"
         };
 
         using var response = await _httpClient.PostAsync(DeviceCodeEndpoint, new FormUrlEncodedContent(form), cancellationToken);
         var payload = await response.Content.ReadAsStringAsync(cancellationToken);
-        response.EnsureSuccessStatusCode();
+        
+        if (!response.IsSuccessStatusCode)
+        {
+            LauncherLog.Info($"[Microsoft Auth] BeginDeviceLogin failed ({(int)response.StatusCode}): {payload}");
+            throw CreateMicrosoftAuthException(payload);
+        }
 
         var result = JsonSerializer.Deserialize<DeviceCodeResponse>(payload, JsonOptions)
             ?? throw new InvalidOperationException("Microsoft device login response was empty.");
@@ -136,6 +150,7 @@ internal sealed class MinecraftAuthenticationService
                 continue;
             }
 
+            LauncherLog.Info($"[Microsoft Auth] Token polling failed ({(int)response.StatusCode}): {payload}");
             throw CreateMicrosoftAuthException(payload);
         }
 
@@ -303,5 +318,38 @@ internal sealed class MinecraftAuthenticationService
     {
         public string id { get; set; } = string.Empty;
         public string name { get; set; } = string.Empty;
+    }
+
+    // Username/Password Authentication Method
+    public async Task<LauncherAccount> AuthenticateWithUsernamePasswordAsync(string clientId, string username, string password, CancellationToken cancellationToken)
+    {
+        // Validate inputs
+        if (string.IsNullOrWhiteSpace(username))
+            throw new ArgumentException("Username cannot be empty.", nameof(username));
+
+        if (string.IsNullOrWhiteSpace(password))
+            throw new ArgumentException("Password cannot be empty.", nameof(password));
+
+        // Use OAuth 2.0 Resource Owner Password Credentials (ROPC) grant
+        var form = new Dictionary<string, string>
+        {
+            ["client_id"] = clientId,
+            ["grant_type"] = "password",
+            ["username"] = username,
+            ["password"] = password,
+            ["scope"] = Scope
+        };
+
+        using var response = await _httpClient.PostAsync(TokenEndpoint, new FormUrlEncodedContent(form), cancellationToken);
+        var payload = await response.Content.ReadAsStringAsync(cancellationToken);
+
+        if (!response.IsSuccessStatusCode)
+            throw CreateMicrosoftAuthException(payload);
+
+        var token = JsonSerializer.Deserialize<TokenResponse>(payload, JsonOptions)
+            ?? throw new InvalidOperationException("Microsoft token response was empty.");
+
+        // Create Minecraft account using the obtained token
+        return await CreateMinecraftAccountAsync(token, cancellationToken);
     }
 }
