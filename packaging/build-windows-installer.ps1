@@ -40,6 +40,7 @@ $wixArgs = @(
     "--define", "PublishDir=$publishDir"
 )
 
+Write-Host "Running: dotnet $($wixArgs -join ' ')"
 & dotnet @wixArgs
 
 if ($LASTEXITCODE -ne 0) {

@@ -3,6 +3,8 @@ name: Build Windows MSI
 on:
   workflow_dispatch:
   push:
+    branches:
+      - main
     tags:
       - "v*"
 
@@ -21,6 +23,13 @@ jobs:
 
       - name: Restore local tools
         run: dotnet tool restore
+
+      - name: Show installer script used by CI
+        shell: pwsh
+        run: |
+          Write-Host "--- packaging/build-windows-installer.ps1 ---"
+          Get-Content ./packaging/build-windows-installer.ps1
+          Write-Host "--------------------------------------------"
 
       - name: Build MSI
         shell: pwsh
