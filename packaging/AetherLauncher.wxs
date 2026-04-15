@@ -1,5 +1,5 @@
 ﻿<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
-  <Package Name="Aether Launcher" Language="1033" Version="1.0.0" Manufacturer="Aether Launcher Team" UpgradeCode="{E5B1E6F0-93A7-4E7E-9D0E-5C0D59A1B2F7}" InstallerVersion="500" Compressed="yes" Scope="perMachine" Platform="x64">
+  <Package Name="Aether Launcher" Language="1033" Version="1.0.0" Manufacturer="Aether Launcher Team" UpgradeCode="{E5B1E6F0-93A7-4E7E-9D0E-5C0D59A1B2F7}" InstallerVersion="500" Compressed="yes" Scope="perMachine">
     <MajorUpgrade DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
     <MediaTemplate EmbedCab="yes" />
 
