@@ -35,9 +35,7 @@ $wixArgs = @(
     "tool", "run", "wix", "--", "build",
     "-arch", "x64",
     "-src", $wxsFile,
-    "-out", $msiPath,
-    "--define", "ProjectDir=$root",
-    "--define", "PublishDir=$publishDir"
+    "-out", $msiPath
 )
 
 Write-Host "Running: dotnet $($wixArgs -join ' ')"
