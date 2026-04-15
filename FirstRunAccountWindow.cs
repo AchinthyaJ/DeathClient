@@ -103,11 +103,10 @@ public sealed class FirstRunAccountWindow : Window
             BorderBrush = new SolidColorBrush(Color.FromArgb(90, 160, 220, 255)),
             BorderThickness = new Thickness(1),
             CornerRadius = new CornerRadius(999),
-            Padding = new Thickness(18, 10),
-            HorizontalAlignment = HorizontalAlignment.Center,
-            Width = 240,
-            Height = 48,
-            FontSize = 14,
+            Padding = new Thickness(20, 14),
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            Height = 58,
+            FontSize = 15,
             FontWeight = FontWeight.SemiBold
         };
 

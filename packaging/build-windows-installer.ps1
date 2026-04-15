@@ -31,7 +31,8 @@ New-Item -ItemType Directory -Force -Path $installerDir | Out-Null
 
 $msiPath = Join-Path $installerDir "AetherLauncher-Setup.msi"
 
-& dotnet tool run wix -- build -arch x64 -src $wxsFile -out $msiPath -dProjectDir=$root -dPublishDir=$publishDir
+# WiX v4 expects define values via: -d Name=Value
+& dotnet tool run wix -- build -arch x64 -src $wxsFile -out $msiPath -d "ProjectDir=$root" -d "PublishDir=$publishDir"
 
 if ($LASTEXITCODE -ne 0) {
     throw "WiX build failed with exit code $LASTEXITCODE."
