@@ -9,7 +9,7 @@
   <AssemblyName>AetherLauncher</AssemblyName>
   <Version>1.0.0</Version>
   <Product>Aether Launcher</Product>
-  <Authors>Death Client Team</Authors>
+  <Authors>Aether Launcher Team</Authors>
   <PackageId>AetherLauncher</PackageId>
 
   <PublishSingleFile>true</PublishSingleFile>

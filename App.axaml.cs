@@ -4,6 +4,7 @@ using Avalonia.Controls.ApplicationLifetimes;
 using Avalonia.Markup.Xaml;
 using System;
 using System.Threading.Tasks;
+using CmlLib.Core;
 
 namespace OfflineMinecraftLauncher;
 
@@ -19,7 +20,21 @@ public partial class App : Application
         if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
         {
             desktop.ShutdownMode = ShutdownMode.OnLastWindowClose;
-            desktop.MainWindow = new MainWindow();
+            // First-run onboarding: create account before showing launcher UI.
+            // We also show onboarding if no accounts exist yet.
+            try
+            {
+                var initialPath = new MinecraftPath();
+                initialPath.CreateDirs();
+                var store = new UserSettingsStore(initialPath.BasePath);
+                var settings = store.Load();
+                var needsOnboarding = settings.IsFirstRun || settings.Accounts.Count == 0;
+                desktop.MainWindow = needsOnboarding ? new FirstRunAccountWindow() : new MainWindow();
+            }
+            catch
+            {
+                desktop.MainWindow = new MainWindow();
+            }
             desktop.Exit += (_, _) => AppRuntime.SkinServer.Dispose();
             _ = StartSkinServerInBackgroundAsync();
         }

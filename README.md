@@ -50,17 +50,23 @@ A fast, modern Minecraft launcher built for **performance** and **zero-friction 
 
 ### Windows
 
-* Download the `.exe`
-* Double click to run
+* Download the `.exe` or build the MSI from `packaging/build-windows-installer.cmd`
+* Double click the `.msi` to install
 
 ### Linux
 
-* Download the binary
+* Download the binary or install the `.deb`
 
 ```bash
 chmod +x death-client-linux
 ./death-client-linux
 ```
+
+### Windows MSI
+
+If you want a proper Windows installer, run `packaging/build-windows-installer.cmd` on Windows after installing the WiX CLI, or run `packaging/build-windows-installer.ps1` after publishing `win-x64`.
+
+If you do not have Windows, use GitHub Actions: run the workflow in `.github/workflows/windows-msi.yml` from the Actions tab, then download the MSI artifact from that workflow run.
 
 ---
 

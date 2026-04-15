@@ -1,0 +1,41 @@
+name: Build Windows MSI
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build-msi:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Restore local tools
+        run: dotnet tool restore
+
+      - name: Build MSI
+        shell: pwsh
+        run: ./packaging/build-windows-installer.ps1
+
+      - name: Upload MSI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AetherLauncher-Setup-msi
+          path: dist/installer/AetherLauncher-Setup.msi
+          if-no-files-found: error
+
+      - name: Upload Windows EXE artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AetherLauncher-win-x64-exe
+          path: dist/publish/win-x64/AetherLauncher.exe
+          if-no-files-found: error

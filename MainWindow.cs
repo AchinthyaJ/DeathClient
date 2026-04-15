@@ -1233,9 +1233,11 @@ public sealed class MainWindow : Window
                 {
                     _settings.SelectedAccountId = string.Empty;
                     usernameInput.Text = string.Empty;
+                    UsernameInput_TextChanged();
                 }
                 _settingsStore.Save(_settings);
                 RefreshAccountsList();
+                UpdateAccountsButtonText();
             };
 
             var rowGrid = new Grid
@@ -1261,6 +1263,7 @@ public sealed class MainWindow : Window
             {
                 _settings.SelectedAccountId = account.Id;
                 usernameInput.Text = account.Username;
+                UsernameInput_TextChanged();
                 _settingsStore.Save(_settings);
                 RefreshAccountsList();
                 UpdateAccountsButtonText();
@@ -1281,9 +1284,77 @@ public sealed class MainWindow : Window
         _settings.Accounts.Add(acc);
         _settings.SelectedAccountId = acc.Id;
         usernameInput.Text = acc.Username;
+        UsernameInput_TextChanged();
         _settingsStore.Save(_settings);
         UpdateAccountsButtonText();
         RefreshAccountsList();
+    }
+
+    private LauncherAccount? GetSelectedAccount()
+        => _settings.Accounts.FirstOrDefault(a => a.Id == _settings.SelectedAccountId);
+
+    private string GetActiveUsername()
+    {
+        var selectedAccount = GetSelectedAccount();
+        if (selectedAccount != null && !string.IsNullOrWhiteSpace(selectedAccount.Username))
+            return selectedAccount.Username;
+
+        return usernameInput.Text?.Trim() ?? string.Empty;
+    }
+
+    private bool IsUsingMicrosoftAccount()
+        => string.Equals(GetSelectedAccount()?.Provider, "microsoft", StringComparison.OrdinalIgnoreCase);
+
+    private bool HasManualSkinOverride()
+    {
+        var manualSkinPath = Path.Combine(_defaultMinecraftPath.BasePath, "death-client", "skin.png");
+        return string.Equals(_settings.CustomSkinPath, manualSkinPath, StringComparison.OrdinalIgnoreCase)
+            && File.Exists(manualSkinPath);
+    }
+
+    private bool HasManualCapeOverride()
+    {
+        var manualCapePath = Path.Combine(_defaultMinecraftPath.BasePath, "death-client", "cape.png");
+        return string.Equals(_settings.CustomCapePath, manualCapePath, StringComparison.OrdinalIgnoreCase)
+            && File.Exists(manualCapePath);
+    }
+
+    private async Task<MSession> BuildLaunchSessionAsync(CancellationToken cancellationToken)
+    {
+        var selectedAccount = GetSelectedAccount();
+        if (selectedAccount != null && string.Equals(selectedAccount.Provider, "microsoft", StringComparison.OrdinalIgnoreCase))
+        {
+            if (selectedAccount.IsExpired)
+            {
+                var refreshed = await TryRefreshAccountAsync(selectedAccount);
+                if (!refreshed)
+                    throw new InvalidOperationException("The selected Microsoft account could not be refreshed. Sign in again.");
+
+                selectedAccount = GetSelectedAccount();
+            }
+
+            if (selectedAccount == null || string.IsNullOrWhiteSpace(selectedAccount.MinecraftAccessToken))
+                throw new InvalidOperationException("The selected Microsoft account is missing a Minecraft access token. Sign in again.");
+
+            if (string.IsNullOrWhiteSpace(selectedAccount.Uuid))
+                throw new InvalidOperationException("The selected Microsoft account is missing the Minecraft profile UUID.");
+
+            return new MSession
+            {
+                Username = selectedAccount.Username,
+                UUID = selectedAccount.Uuid,
+                AccessToken = selectedAccount.MinecraftAccessToken,
+                Xuid = selectedAccount.Xuid,
+                UserType = "msa"
+            };
+        }
+
+        var username = GetActiveUsername();
+        var session = MSession.CreateOfflineSession(username);
+        session.UUID = string.IsNullOrWhiteSpace(_playerUuid)
+            ? Character.GenerateUuidFromUsername(username)
+            : _playerUuid;
+        return session;
     }
 
     private async Task<bool> TryRefreshAccountAsync(LauncherAccount account)
@@ -1343,6 +1414,7 @@ public sealed class MainWindow : Window
                 _settings.Accounts.Add(account);
                 _settings.SelectedAccountId = account.Id;
                 usernameInput.Text = account.Username;
+                UsernameInput_TextChanged();
                 _settingsStore.Save(_settings);
                 
                 LauncherLog.Info($"[Microsoft Auth] Successfully logged in as {account.Username}");
@@ -1452,7 +1524,11 @@ public sealed class MainWindow : Window
     {
         if (accountsNavButton != null)
         {
-            var activeName = string.IsNullOrWhiteSpace(_settings.Username) ? "Accounts" : _settings.Username;
+            var activeName = GetSelectedAccount()?.Username;
+            if (string.IsNullOrWhiteSpace(activeName))
+                activeName = string.IsNullOrWhiteSpace(usernameInput.Text) ? _settings.Username : usernameInput.Text;
+            if (string.IsNullOrWhiteSpace(activeName))
+                activeName = "Accounts";
             accountsNavButton.Content = $"🧑 {activeName}";
         }
     }
@@ -2834,9 +2910,10 @@ public sealed class MainWindow : Window
         }
         
         loadingLabel.Text = string.Empty;
-        usernameInput.Text = _settings.Username;
-        if (string.IsNullOrWhiteSpace(usernameInput.Text))
-            usernameInput.Text = Environment.UserName;
+        usernameInput.Text = string.IsNullOrWhiteSpace(_settings.Username) ? Environment.UserName : _settings.Username;
+        if (selectedAcc != null && !string.IsNullOrWhiteSpace(selectedAcc.Username))
+            usernameInput.Text = selectedAcc.Username;
+        UsernameInput_TextChanged();
 
         profileLoaderCombo.SelectedIndex = 0;
         _quickLoaderCombo.SelectedIndex = 0;
@@ -2962,7 +3039,7 @@ public sealed class MainWindow : Window
                 }
                 catch (Exception ex)
                 {
-                    LauncherLog.Info($"[Death Client] Offline version list failed: {ex}");
+                    LauncherLog.Info($"[Aether Launcher] Offline version list failed: {ex}");
                 }
             }
 
@@ -3015,7 +3092,8 @@ public sealed class MainWindow : Window
 
     private async Task LaunchAsync()
     {
-        if (string.IsNullOrWhiteSpace(usernameInput.Text))
+        var activeUsername = GetActiveUsername();
+        if (string.IsNullOrWhiteSpace(activeUsername))
         {
             await DialogService.ShowInfoAsync(this, "Username required", "Enter a username before launching.");
             return;
@@ -3079,11 +3157,7 @@ public sealed class MainWindow : Window
                 await launcher.InstallAsync(versionToLaunch, token);
             }
 
-            var username = usernameInput.Text.Trim();
-            var session = MSession.CreateOfflineSession(username);
-            session.UUID = string.IsNullOrWhiteSpace(_playerUuid)
-                ? Character.GenerateUuidFromUsername(username)
-                : _playerUuid;
+            var session = await BuildLaunchSessionAsync(token);
 
             var targetGameVer = _selectedProfile?.GameVersion ?? versionToLaunch;
             var javaPath = await GetJavaPathForVersionAsync(targetGameVer, token);
@@ -3135,7 +3209,7 @@ public sealed class MainWindow : Window
             token.ThrowIfCancellationRequested(); // Final check
             process.Start();
 
-            _settings.Username = usernameInput.Text.Trim();
+            _settings.Username = activeUsername;
             _settings.Version = cbVersion.SelectedItem?.ToString() ?? string.Empty;
             _settingsStore.Save(_settings);
             
@@ -3528,7 +3602,10 @@ public sealed class MainWindow : Window
 
     public async void UsernameInput_TextChanged()
     {
-        if (string.IsNullOrWhiteSpace(usernameInput.Text))
+        var selectedAccount = GetSelectedAccount();
+        var username = GetActiveUsername();
+
+        if (string.IsNullOrWhiteSpace(username))
         {
             _playerUuid = string.Empty;
             characterImage.Source = null;
@@ -3538,8 +3615,9 @@ public sealed class MainWindow : Window
 
         btnStart.IsEnabled = true;
         
-        var username = usernameInput.Text.Trim();
-        _playerUuid = Character.GenerateUuidFromUsername(username);
+        _playerUuid = !string.IsNullOrWhiteSpace(selectedAccount?.Uuid)
+            ? selectedAccount!.Uuid
+            : Character.GenerateUuidFromUsername(username);
         
         _skinCancellation?.Cancel();
         _skinCancellation = new System.Threading.CancellationTokenSource();
@@ -3557,7 +3635,9 @@ public sealed class MainWindow : Window
 
     private async Task FetchAndSetSkinAsync(string username, CancellationToken token)
     {
-        var uuid = Character.GenerateUuidFromUsername(username);
+        var uuid = GetSelectedAccount()?.Uuid;
+        if (string.IsNullOrWhiteSpace(uuid))
+            uuid = Character.GenerateUuidFromUsername(username);
         var url = $"https://crafatar.com/skins/{uuid}";
         
         var skinsDir = Path.Combine(_defaultMinecraftPath.BasePath, "death-client", "skins");
@@ -3583,7 +3663,7 @@ public sealed class MainWindow : Window
 
         Avalonia.Threading.Dispatcher.UIThread.Post(() =>
         {
-            if (usernameInput.Text?.Trim() == username)
+            if (GetActiveUsername() == username)
             {
                 UpdateCharacterPreview();
             }
@@ -4384,12 +4464,14 @@ public sealed class MainWindow : Window
             {
                 new TextBlock { Text = "Pick a primary accent color for the launcher UI.", Foreground = new SolidColorBrush(Color.Parse("#B0BACF")), FontSize = 14 },
                 new StackPanel { Orientation = Orientation.Horizontal, Spacing = 10, Children = {
-                    CreatePrimaryButton("Import Custom Layout", "#6E5BFF", Colors.White).With(btn => {
-                        btn.Click += async (_, _) => await ImportLayoutAsync();
+                    CreatePrimaryButton("Import Custom Layout", "#050505", Color.FromArgb(160, 120, 120, 120)).With(btn => {
+                        btn.IsEnabled = false;
+                        btn.Opacity = 0.65;
+                        btn.BorderBrush = new SolidColorBrush(Color.FromArgb(90, 32, 32, 32));
                     }),
                     new TextBlock { 
-                        Text = "• Recommended: Use layouts from the official website only.", 
-                        Foreground = new SolidColorBrush(Color.Parse("#FFB85B")), 
+                        Text = "Note: In Testing", 
+                        Foreground = new SolidColorBrush(Color.Parse("#B0BACF")), 
                         FontSize = 12, 
                         FontStyle = FontStyle.Italic,
                         VerticalAlignment = VerticalAlignment.Center 
@@ -5891,7 +5973,7 @@ public sealed class MainWindow : Window
                 WriteTextEntry(
                     archive,
                     "pack.mcmeta",
-                    "{\"pack\":{\"pack_format\":1,\"description\":\"Death Client UI theme for home, multiplayer, and singleplayer menus\"}}");
+                    "{\"pack\":{\"pack_format\":1,\"description\":\"Aether Launcher UI theme for home, multiplayer, and singleplayer menus\"}}");
 
                 AddExistingFileToArchive(archive, ResolveThemeLogoPath(), "pack.png");
                 AddExistingFileToArchive(archive, ResolveBundledThemeAsset("death_client_title_logo.png"), "assets/minecraft/textures/gui/title/minecraft.png");
@@ -5919,7 +6001,7 @@ public sealed class MainWindow : Window
                 WriteTextEntry(
                     archive,
                     "assets/minecraft/texts/splashes.txt",
-                    "Death Client: Redefining Play\nUnrivaled Performance, Unmatched Style\nQueue up and dominate\nPeak precision, crafted for champions\nCleanest UI, fastest launch\nOffline mode, but never basic\nJoin the Reborn Movement");
+                    "Aether Launcher: Redefining Play\nUnrivaled Performance, Unmatched Style\nQueue up and dominate\nPeak precision, crafted for champions\nCleanest UI, fastest launch\nOffline mode, but never basic\nJoin the Reborn Movement");
 
                 AddSkinAndCapeEntries(archive);
             }
@@ -5931,7 +6013,10 @@ public sealed class MainWindow : Window
 
     private void AddSkinAndCapeEntries(ZipArchive archive)
     {
-        if (!string.IsNullOrWhiteSpace(_settings.CustomSkinPath) && File.Exists(_settings.CustomSkinPath))
+        var allowSkinOverride = !IsUsingMicrosoftAccount() || HasManualSkinOverride();
+        var allowCapeOverride = !IsUsingMicrosoftAccount() || HasManualCapeOverride();
+
+        if (allowSkinOverride && !string.IsNullOrWhiteSpace(_settings.CustomSkinPath) && File.Exists(_settings.CustomSkinPath))
         {
             AddExistingFileToArchive(archive, _settings.CustomSkinPath, "assets/minecraft/textures/entity/steve.png");
             AddExistingFileToArchive(archive, _settings.CustomSkinPath, "assets/minecraft/textures/entity/alex.png");
@@ -5939,7 +6024,7 @@ public sealed class MainWindow : Window
             AddExistingFileToArchive(archive, _settings.CustomSkinPath, "assets/minecraft/textures/entity/player/slim/alex.png");
         }
 
-        if (!string.IsNullOrWhiteSpace(_settings.CustomCapePath) && File.Exists(_settings.CustomCapePath))
+        if (allowCapeOverride && !string.IsNullOrWhiteSpace(_settings.CustomCapePath) && File.Exists(_settings.CustomCapePath))
         {
             AddExistingFileToArchive(archive, _settings.CustomCapePath, "assets/minecraft/textures/entity/cape.png");
             AddExistingFileToArchive(archive, _settings.CustomCapePath, "assets/minecraft/textures/entity/elytra.png");
@@ -6498,7 +6583,7 @@ public sealed class MainWindow : Window
         Foreground = new SolidColorBrush(Color.Parse("#A0A8B8"))
     };
 
-    private void UsernameInput_TextChanged(object? sender, TextChangedEventArgs e) => UpdateCharacterPreview();
+    private void UsernameInput_TextChanged(object? sender, TextChangedEventArgs e) => UsernameInput_TextChanged();
 
     private void CbVersion_SelectionChanged(object? sender, SelectionChangedEventArgs e)
     {
