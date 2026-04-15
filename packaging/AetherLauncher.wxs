@@ -3,7 +3,7 @@
     <MajorUpgrade DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
     <MediaTemplate EmbedCab="yes" />
 
-    <Icon Id="LauncherIcon" SourceFile="..\minecraft.ico" />
+    <Icon Id="LauncherIcon" SourceFile="minecraft.ico" />
     <Property Id="ARPPRODUCTICON" Value="LauncherIcon" />
     <Property Id="ARPNOREPAIR" Value="yes" />
 
@@ -17,7 +17,7 @@
 
     <DirectoryRef Id="INSTALLFOLDER">
       <Component Id="LauncherExecutable" Guid="{8B5B3C3A-4B0D-4D0D-8A94-76C8E0D5B2D1}" Bitness="always64">
-        <File Id="LauncherExe" Source="..\dist\publish\win-x64\AetherLauncher.exe" KeyPath="yes" />
+        <File Id="LauncherExe" Source="dist\publish\win-x64\AetherLauncher.exe" KeyPath="yes" />
       </Component>
     </DirectoryRef>
 
