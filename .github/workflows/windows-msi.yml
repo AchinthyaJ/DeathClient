@@ -13,6 +13,12 @@ jobs:
     runs-on: windows-latest
 
     steps:
+      - name: Show workflow ref
+        shell: pwsh
+        run: |
+          Write-Host "GITHUB_REF=$env:GITHUB_REF"
+          Write-Host "GITHUB_SHA=$env:GITHUB_SHA"
+
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -21,19 +27,18 @@ jobs:
         with:
           dotnet-version: "10.0.x"
 
-      - name: Restore local tools
-        run: dotnet tool restore
-
-      - name: Show installer script used by CI
+      - name: Build Windows EXE and MSI
         shell: pwsh
         run: |
-          Write-Host "--- packaging/build-windows-installer.ps1 ---"
-          Get-Content ./packaging/build-windows-installer.ps1
-          Write-Host "--------------------------------------------"
+          dotnet publish ./OfflineMinecraftLauncher.csproj -c Release -r win-x64 -o ./dist/publish/win-x64 --self-contained true /p:PublishSingleFile=true /p:IncludeNativeLibrariesForSelfExtract=true /p:PublishReadyToRun=false
+          if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed with exit code $LASTEXITCODE" }
 
-      - name: Build MSI
-        shell: pwsh
-        run: ./packaging/build-windows-installer.ps1
+          dotnet tool restore
+          if ($LASTEXITCODE -ne 0) { throw "dotnet tool restore failed with exit code $LASTEXITCODE" }
+
+          New-Item -ItemType Directory -Force -Path ./dist/installer | Out-Null
+          dotnet tool run wix -- build -arch x64 -src ./packaging/AetherLauncher.wxs -out ./dist/installer/AetherLauncher-Setup.msi
+          if ($LASTEXITCODE -ne 0) { throw "wix build failed with exit code $LASTEXITCODE" }
 
       - name: Upload MSI artifact
         uses: actions/upload-artifact@v4
