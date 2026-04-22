@@ -88,7 +88,7 @@ public sealed class FirstRunAccountWindow : Window
 
         _submitButton = new Button
         {
-            Content = "Create",
+            Content = "Start Playing",
             Background = new LinearGradientBrush
             {
                 StartPoint = new RelativePoint(0, 0, RelativeUnit.Relative),
@@ -289,7 +289,7 @@ public sealed class FirstRunAccountWindow : Window
             _modeButton.Content = "Offline Mode  ·  Toggle";
             _usernameInput.IsVisible = true;
             _hintText.Text = "Offline account: choose any username.";
-            _submitButton.Content = "Create";
+            _submitButton.Content = "Start Playing";
         }
         else
         {

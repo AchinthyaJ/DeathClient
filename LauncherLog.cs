@@ -54,6 +54,11 @@ internal static class LauncherLog
             }
         }
 
+        // Write logs to the console for immediate visibility
+        Console.WriteLine(line);
+        if (exception is not null)
+            Console.WriteLine(exception);
+
         OnLog?.Invoke(line);
     }
 }

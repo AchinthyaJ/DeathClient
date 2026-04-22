@@ -28,6 +28,8 @@ namespace OfflineMinecraftLauncher
             };
 
             _watcher.Changed += OnFileChanged;
+            _watcher.Deleted += OnFileChanged;
+            _watcher.Renamed += OnFileChanged;
         }
 
         private void OnFileChanged(object sender, FileSystemEventArgs e)
