@@ -19,7 +19,7 @@ A fast, modern Minecraft launcher built for **performance** and **zero-friction 
 
 ---
 
-## 💡 Why Death Client?
+## 💡 Why Aether Launcher?
 
 * Faster setup than traditional launchers
 * No confusing menus or bloated UI
@@ -102,7 +102,7 @@ Contributions, issues, and suggestions are welcome.
 
 ## ⚠️ Disclaimer
 
-Death Client is an independent project and is not affiliated with Mojang or Microsoft.
+Aether Launcher is an independent project and is not affiliated with Mojang or Microsoft.
 
 ---
 
